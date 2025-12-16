@@ -13,6 +13,7 @@ use bitcoin::Txid;
 use corepc_types::v29::GetTxOut;
 use corepc_types::ScriptPubkey;
 use floresta_chain::extensions::HeaderExt;
+use floresta_chain::extensions::WorkExt;
 use miniscript::descriptor::checksum;
 use serde_json::json;
 use serde_json::Value;
@@ -172,7 +173,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
         let height = header.get_height(&self.chain)?;
         let median_time_past = header.calculate_median_time_past(&self.chain)?;
-        let chain_work = header.calculate_chain_work(&self.chain)?.hex_string;
+        let chain_work = header.calculate_chain_work(&self.chain)?.to_hex_string();
         let confirmations = header.get_confirmations(&self.chain)?;
         let version_hex = header.get_version_hex();
         let next_block_hash = header.get_next_block_hash(&self.chain)?;
@@ -224,7 +225,9 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         let validated = self.chain.get_validation_index().unwrap();
         let ibd = self.chain.is_in_ibd();
         let latest_header = self.chain.get_block_header(&hash).unwrap();
-        let latest_work = latest_header.calculate_chain_work(&self.chain)?.hex_string;
+        let latest_work = latest_header
+            .calculate_chain_work(&self.chain)?
+            .to_hex_string();
         let latest_block_time = latest_header.time;
         let leaf_count = self.chain.acc().leaves as u32;
         let root_count = self.chain.acc().roots.len() as u32;

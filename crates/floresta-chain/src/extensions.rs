@@ -26,7 +26,7 @@ pub trait HeaderExt {
     fn calculate_chain_work(
         &self,
         chain: &impl BlockchainInterface,
-    ) -> Result<ChainWork, HeaderExtError>;
+    ) -> Result<Work, HeaderExtError>;
 
     /// Retrieves the hash of the next block in the chain, if it exists.
     ///
@@ -79,33 +79,75 @@ pub enum HeaderExtError {
     /// Indicates that the block could not be found in the blockchain.
     BlockNotFound,
 
-    /// An error occurred while calculating the chain work.
-    ChainWork(ChainWorkError),
+    /// You got an overflow while calculating the chain work.
+    ChainWorkOverflow,
 }
 
-/// Represents specific errors that can occur during chain work calculations.
-#[derive(Debug)]
-pub enum ChainWorkError {
-    /// Indicates an overflow occurred during the calculation.
-    Overflow,
-
-    /// Indicates a failure to parse or process the chain work.
-    ParseFailed,
+impl From<ChainWorkOverflow> for HeaderExtError {
+    fn from(_: ChainWorkOverflow) -> Self {
+        Self::ChainWorkOverflow
+    }
 }
 
-/// Represents the accumulated chain work up to a specific block.
-/// Contains the raw work value and its hexadecimal representation.
-#[derive(Debug)]
-pub struct ChainWork {
-    /// Hexadecimal representation of the accumulated chain work.
-    ///
-    /// Using `to_string` on `Work` returns the value in decimal, but Bitcoin Core
-    /// represents chain work in hexadecimal. Use this field to ensure the value
-    /// is displayed in hexadecimal format, consistent with Bitcoin Core.
-    pub hex_string: String,
+#[derive(Debug, PartialEq)]
+pub struct ChainWorkOverflow;
 
-    /// Raw accumulated chain work value.
-    pub work: Work,
+pub trait WorkExt {
+    fn multiply_work_by_u32(self, factor: u32) -> Result<Work, ChainWorkOverflow>;
+
+    fn to_hex_string(&self) -> String;
+}
+
+impl WorkExt for Work {
+    fn multiply_work_by_u32(self, factor: u32) -> Result<Work, ChainWorkOverflow> {
+        if factor == 0 {
+            return Ok(Work::from_be_bytes([0u8; 32]));
+        }
+
+        let work = self;
+
+        if factor == 1 {
+            return Ok(work);
+        }
+
+        // Convert Work to little-endian bytes for easier manipulation (least significant byte first)
+        let work_bytes = work.to_le_bytes();
+        let mut carry_high: u64 = 0;
+        let mut result_bytes = [0u8; 32];
+        let word_size = 4_usize;
+
+        // Multiply each 4-byte word (u32) of Work by the factor, propagating carry
+        // Work is processed in little-endian order (from least significant byte to most significant byte),
+        // but result is stored in big-endian
+        let (by_chunks, r) = work_bytes.as_chunks::<4_usize>();
+
+        assert!(r.len() == 0);
+
+        for (word_index, word) in by_chunks.iter().enumerate() {
+            let word = u32::from_le_bytes(word.clone());
+
+            // Multiply the word by factor and add carry from previous step
+            // Use u64 to avoid overflow during multiplication
+            let product: u64 = (word as u64) * (factor as u64) + carry_high;
+            carry_high = product >> 32;
+
+            // Store the low 32 bits of the product in the result
+            // Result is built in big-endian order, so calculate the index accordingly
+            let byte_index = by_chunks.len() - word_index;
+            result_bytes[(byte_index - 1) * word_size..byte_index * word_size]
+                .copy_from_slice(&(product as u32).to_be_bytes());
+        }
+
+        if carry_high > 0 {
+            return Err(ChainWorkOverflow);
+        }
+
+        Ok(Work::from_be_bytes(result_bytes))
+    }
+
+    fn to_hex_string(&self) -> String {
+        serialize_hex(&self.to_be_bytes())
+    }
 }
 
 impl HeaderExt for Header {
@@ -131,7 +173,7 @@ impl HeaderExt for Header {
     fn calculate_chain_work(
         &self,
         chain: &impl BlockchainInterface,
-    ) -> Result<ChainWork, HeaderExtError> {
+    ) -> Result<Work, HeaderExtError> {
         let block_height = self.get_height(chain)?;
 
         let mut total_chainwork = Work::from_be_bytes([0u8; 32]);
@@ -148,14 +190,13 @@ impl HeaderExt for Header {
                 .get_block_header(&epoch_block_hash)
                 .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
 
-            let epoch_chainwork = multiply_work_by_u32(epoch_block_header.work(), blocks_in_epoch)?;
+            let epoch_chainwork = epoch_block_header
+                .work()
+                .multiply_work_by_u32(blocks_in_epoch)?;
             total_chainwork = total_chainwork.add(epoch_chainwork);
         }
 
-        Ok(ChainWork {
-            hex_string: serialize_hex(&total_chainwork.to_be_bytes()),
-            work: total_chainwork,
-        })
+        Ok(total_chainwork)
     }
 
     fn get_next_block_hash(
@@ -216,52 +257,6 @@ impl HeaderExt for Header {
     fn get_version_hex(&self) -> String {
         serialize_hex(&(self.version.to_consensus() as u32).to_be())
     }
-}
-
-fn multiply_work_by_u32(work: Work, factor: u32) -> Result<Work, HeaderExtError> {
-    if factor == 0 {
-        return Ok(Work::from_be_bytes([0u8; 32]));
-    }
-    if factor == 1 {
-        return Ok(work);
-    }
-
-    // Convert Work to little-endian bytes for easier manipulation (least significant byte first)
-    let work_bytes = work.to_le_bytes();
-    let mut carry_high: u64 = 0;
-    let mut result_bytes = [0u8; 32];
-    let word_size = 4_usize;
-    let num_words = work_bytes.len() / word_size;
-
-    // Multiply each 4-byte word (u32) of Work by the factor, propagating carry
-    // Work is processed in little-endian order (from least significant byte to most significant byte),
-    // but result is stored in big-endian
-    for i in 0..num_words {
-        let slice = &work_bytes[i * word_size..(i + 1) * word_size];
-        let word = match slice.try_into() {
-            Ok(arr) => u32::from_le_bytes(arr),
-            Err(_) => {
-                return Err(HeaderExtError::ChainWork(ChainWorkError::ParseFailed));
-            }
-        };
-
-        // Multiply the word by factor and add carry from previous step
-        // Use u64 to avoid overflow during multiplication
-        let product: u64 = (word as u64) * (factor as u64) + carry_high;
-        carry_high = product >> 32;
-
-        // Store the low 32 bits of the product in the result
-        // Result is built in big-endian order, so calculate the index accordingly
-        let byte_index = num_words - i;
-        result_bytes[(byte_index - 1) * word_size..byte_index * word_size]
-            .copy_from_slice(&(product as u32).to_be_bytes());
-    }
-
-    if carry_high > 0 {
-        return Err(HeaderExtError::ChainWork(ChainWorkError::Overflow));
-    }
-
-    Ok(Work::from_be_bytes(result_bytes))
 }
 
 #[cfg(test)]
@@ -532,8 +527,8 @@ mod tests {
             "00000000000000000000000000000000000000000000000000000bb80bb80bb8";
         let expected_work = Work::from_hex(&format!("0x{}", expected_hex_string)).unwrap();
 
-        assert_eq!(work.hex_string, expected_hex_string);
-        assert_eq!(work.work, expected_work);
+        assert_eq!(work.to_hex_string(), expected_hex_string);
+        assert_eq!(work, expected_work);
     }
 
     #[test]
@@ -630,13 +625,14 @@ mod tests {
         let work = Work::from_be_bytes(work_bytes);
         let factor = 2;
 
-        let result = multiply_work_by_u32(work, factor).unwrap();
+        let result = work.multiply_work_by_u32(factor).unwrap();
 
         let expected_bytes: [u8; 32] = [
             0, 0, 0, 6, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0,
             0, 0, 8,
         ];
         let expected = Work::from_be_bytes(expected_bytes);
+
         assert_eq!(result, expected);
     }
 
@@ -650,8 +646,8 @@ mod tests {
         let work = Work::from_be_bytes(work_bytes);
         let factor = u32::MAX;
 
-        let result = multiply_work_by_u32(work, factor);
+        let result = work.multiply_work_by_u32(factor);
 
-        assert!(result.is_err());
+        assert_eq!(result, Err(ChainWorkOverflow));
     }
 }
