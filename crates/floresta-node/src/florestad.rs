@@ -10,12 +10,14 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 pub use bitcoin::Network;
+use floresta_chain::bitcoinkernel::ChainstateManager;
+use floresta_chain::bitcoinkernel::ContextBuilder;
+use floresta_chain::bitcoinkernelimpl::blockchaininterface::BitcoinKernelChainstate;
+use floresta_chain::bitcoinkernelimpl::blockchaininterface::HeadersOnly;
 #[cfg(feature = "zmq-server")]
 use floresta_chain::pruned_utreexo::BlockchainInterface;
 pub use floresta_chain::AssumeUtreexoValue;
 pub use floresta_chain::AssumeValidArg;
-use floresta_chain::BlockchainError;
-use floresta_chain::ChainState;
 use floresta_chain::FlatChainStore as ChainStore;
 use floresta_chain::FlatChainStoreConfig;
 #[cfg(feature = "compact-filters")]
@@ -36,6 +38,7 @@ use rcgen::CertificateParams;
 use rcgen::IsCa;
 use rcgen::KeyPair;
 use rustreexo::accumulator::pollard::Pollard;
+use rustreexo::accumulator::stump::Stump;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::task;
@@ -706,16 +709,27 @@ impl Florestad {
         data_dir: String,
         network: Network,
         assume_valid: AssumeValidArg,
-    ) -> Result<ChainState<ChainStore>, FlorestadError> {
-        let db = Self::load_chain_store(data_dir.clone())?;
+    ) -> Result<BitcoinKernelChainstate, FlorestadError> {
+        let context = ContextBuilder::new()
+            .chain_type(floresta_chain::bitcoinkernel::ChainType::Mainnet)
+            .build()
+            .unwrap();
+        let kernel = ChainstateManager::builder(&context, &data_dir, &data_dir)
+            .unwrap()
+            .worker_threads(4)
+            .chainstate_db_in_memory(true)
+            .block_tree_db_in_memory(true)
+            .build()
+            .unwrap();
 
-        ChainState::<ChainStore>::load_chain_state(db, network, assume_valid).or_else(|e| match e {
-            BlockchainError::ChainNotInitialized => {
-                let db = Self::load_chain_store(data_dir)?;
-                Ok(ChainState::new(db, network, assume_valid))
-            }
-            anyerr => Err(FlorestadError::CouldNotLoadFlatChainStore(anyerr)),
-        })
+        let headers_only = HeadersOnly::new(data_dir);
+
+        Ok(BitcoinKernelChainstate::new(
+            headers_only,
+            context.into(),
+            kernel,
+            Stump::new(),
+        ))
     }
 
     fn load_wallet(data_dir: &String) -> Result<AddressCache<KvDatabase>, FlorestadError> {
