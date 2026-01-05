@@ -1,26 +1,23 @@
-Contributing to Floresta
-==============================
+# Contributing to Floresta
 
 The development of Floresta is a community effort and welcomes contributions from anyone. We are excited you are interested in helping us bringing sovereign and private self-custody to everyone.
 
 We welcome contributions in many forms, including bug reports, feature requests, code contributions, and documentation improvements. From any contributors
 with any level of experience or expertise. We only ask that you respect others and follow the process outlined in this document.
 
-Communications Channels
------------------------
+## Communications Channels
 
 The primary communication channel is the [GitHub repository](https://github.com/vinteumorg/floresta). We also have Discord server, where you can ask questions, discuss features, and get help. You can join the server by clicking [here](https://discord.gg/5Wj8fjjS93).
 
-Contribution Workflow
----------------------
+## Contribution Workflow
 
 The contribution workflow is designed to facilitate cooperation and ensure a high level of quality in the project. The process is as follows:
 
 To contribute a patch, the workflow is as follows:
 
-  1. Fork Repository
-  2. Create topic branch
-  3. Commit patches
+1. Fork Repository
+2. Create topic branch
+3. Commit patches
 
 ### Commits
 
@@ -38,43 +35,41 @@ The Minimum Supported Rust Version is **1.81.0** (enforced by our CI).
 
 Commits should cover both the issue fixed and the solution's rationale.
 
-
 These [guidelines](https://chris.beams.io/posts/git-commit/) should be kept in mind. Commit
 messages follow the ["Conventional Commits 1.0.0"](https://www.conventionalcommits.org/en/v1.0.0/) to make commit histories easier to read by humans and automated tools. The types of commits we use are:
 
-  - bench: benchmark related changes
-  - chore: maintenance tasks
-  - ci: continuous integration
-  - docs: documentation changes
-  - feat: new feature
-  - fix: bug fix
-  - fuzz: adding a new fuzz target or fixing an existing one
-  - perf: code change that improves performance
-  - refactor: code change that neither fixes a bug nor adds a feature
-  - style: formatting, missing semi colons, etc; no code change
-  - test: adding missing tests or correcting existing tests
+- bench: benchmark related changes
+- chore: maintenance tasks
+- ci: continuous integration
+- docs: documentation changes
+- feat: new feature
+- fix: bug fix
+- fuzz: adding a new fuzz target or fixing an existing one
+- perf: code change that improves performance
+- refactor: code change that neither fixes a bug nor adds a feature
+- style: formatting, missing semi colons, etc; no code change
+- test: adding missing tests or correcting existing tests
 
 For `scope`, consider using one of the following where applicable:
 
-  - chain
-  - consensus
-  - cli
-  - common
-  - deps
-  - electrum
-  - filters
-  - florestad
-  - integration, functional, unit (to be used in test commits)
-  - mempool
-  - node
-  - rpc
-  - wallet
-  - wire
+- chain
+- consensus
+- cli
+- common
+- deps
+- electrum
+- filters
+- florestad
+- integration, functional, unit (to be used in test commits)
+- mempool
+- node
+- rpc
+- wallet
+- wire
 
 It is required to [GPG sign](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) your commits.
 
-Peer review
------------
+## Peer review
 
 To make sure our code has the highest quality and is maintainable for posterity, we have a thorough peer review process, where pull requests need to be reviewed by at least one maintainer, and must not have any outstanding comment from regular contributors.
 
@@ -90,6 +85,7 @@ A review can be a conceptual review, where the reviewer leaves a comment:
 A NACK needs to include a rationale why the change is not worthwhile. NACKs without accompanying reasoning may be disregarded.
 
 ### Code Review
+
 After conceptual agreement on the change, code review can be provided. A review begins with ACK BRANCH_COMMIT, where BRANCH_COMMIT is the top of the PR branch, followed by a description of how the reviewer did the review. The following language is used within pull request comments:
 
 "I have tested the code", involving change-specific manual testing in addition to running the unit, functional, or fuzz tests, and in case it is not obvious how the manual testing was done, it should be described;
@@ -101,8 +97,7 @@ Where a patch set affects consensus-critical code, the bar will be much higher i
 
 Where a patch set proposes to change the Bitcoin consensus, it must have been discussed extensively on the mailing list and IRC, be accompanied by a widely discussed BIP and have a generally widely perceived technical consensus of being a worthwhile change based on the judgement of the maintainers.
 
-Coding Conventions
-------------------
+## Coding Conventions
 
 There's a few rules to make sure the code is readable and maintainable. Most of them are checked by `cargo-fmt` and `clippy`, and are enforced by CI. You can run locally `cargo +nightly fmt && cargo +nightly clippy --all` or, if you have the [Just Command Runner](https://github.com/casey/just) you might use `just lint`.
 
@@ -217,8 +212,7 @@ pub fn validate_block_time(
 }
 ```
 
-Documentation for RPC
----------------------
+## Documentation for RPC
 
 We aim on having a good documentation and CLI `help` command.
 
@@ -240,6 +234,7 @@ MethodStruct{
 ```
 
 Example:
+
 ```rust
 #[doc = include_str!("../../../doc/rpc/addnode.md")]
 #[command(name = "addnode",
@@ -255,28 +250,51 @@ AddNode {
 
 To generate the man pages for the RPC commands, follow the instructions outlined [here](doc/RPC_man/README.md).
 
-Security
---------
+## Security
 
 Given the critical nature of Floresta as a node implementation, we take security very serious. If you have any security vulnerability to report, please send it to `me AT dlsouza DOT lol` preferentially using my [PGP key `2C8E0F 836FD7D BBBB9E 9B2EF899 64EC3AB 22B2E3`](https://blog.dlsouza.lol/assets/gpg.asc).
 
-Testing
--------
+## Testing
 
 We expect to have 100% test coverage for critical parts, and a decent level of coverage for everything. We have a few types of tests:
 
-  - Unit: Those tests specific parts of the code, and are usually written in Rust. You can run them using `cargo test`. Ideally, every API-exposed function should have their own unity test.
-  - Functional: Tests the behavior of the running program, intended to check whether the codebase as a whole works as expected. They are either written in Rust or Python
-  - Integration: Checks if `Floresta` works well with other projects, like `Bitcoin Core`, `utreexod` and `Electrum` (for the electrum server). Mainly written in Python.
+- Unit: Those tests specific parts of the code, and are usually written in Rust. You can run them using `cargo test`. Ideally, every API-exposed function should have their own unity test.
+- Functional: Tests the behavior of the running program, intended to check whether the codebase as a whole works as expected. They are either written in Rust or Python
+- Integration: Checks if `Floresta` works well with other projects, like `Bitcoin Core`, `utreexod` and `Electrum` (for the electrum server). Mainly written in Python.
 
-Release
------------
+## Release
 
 Once a maintainer and the contributors decide we have a stable enough `master` with sufficient features, we will create a new branch at that point. From this point, all new changes will go in the next release. The release branch (named after the version, i.e. 0.8.0) will only accept bugfixes and backports. After sufficient testing and making sure we don't have bugs left, this branch will be released by one of the maintainers.
 
-The release will have pre-built binaries available on github's asset page. They **must** be GPG signed, and have a list of hashes for each asset.
+### Versioning
 
-If we find bugs on a release, the fix may be backported and a new minor release may be released. This is done by merging fixes on top of the release branch. And then performing another release on that branch.
+This project follows [Semantic Versioning (semver)](https://semver.org/). However, we maintain **separate version tracks** for different components:
 
+- **Application binaries** (`florestad` and `floresta-cli`): These follow the main project release cycle and share a version number (e.g., `0.8.x`).
+- **Library crates** (the crates re exported in `floresta`): These are versioned independently based on their public API stability (e.g., `0.4.x`).
+
+This separation exists because library crates published to crates.io must be versioned according to their API changes, which don't always align with application feature releases.
+
+### Signed Binaries.
+
+A release should contain pre-built binaries available on github's asset page. They **must** be GPG signed, and have a list of hashes for each asset.
+
+Building and signing is done with the help of a just recipe created only for it, this allows for the project to have a certain reproducibility for the release assets.
+
+Creating a release can be achieved with `just release`, it will run `just build-release` and `just release-sign` right after, which by itself will run `sha256sum` on the binaries and sign them using `gpg`.
+
+This will generate two files unde `contrib/dist/signed_binaries`, one text file containing the hashes and their accordingly binaries
+
+```text
+florestad.{version} {hash}
+
+floresta-cli.{version} {hash}
+```
+
+and another `.asc` one, with same name, containing your signature.
+
+There may have others `.asc` named with emails, these are the ones signed by `Floresta Team`, you should be able to check them somehow.
+
+TODO: how to fucking check this in a decent manner.
 
 If you have any questions, related to this process or the codebase in general. Don't hesitate to reach us out, we are happy to help newcomers in their amazing journey. Overall, have fun :)
