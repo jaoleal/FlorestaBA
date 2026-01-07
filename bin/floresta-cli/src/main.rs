@@ -8,9 +8,8 @@ use bitcoin::Txid;
 use clap::Parser;
 use clap::Subcommand;
 use floresta_rpc::jsonrpc_client::Client;
-use floresta_rpc::rpc::FlorestaRPC;
+use floresta_rpc::rpc::FlorestaJsonRPC;
 use floresta_rpc::rpc_types::AddNodeCommand;
-use floresta_rpc::rpc_types::GetBlockRes;
 use floresta_rpc::rpc_types::RescanConfidence;
 
 // Main function that runs the CLI application
@@ -65,7 +64,7 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
             serde_json::to_string_pretty(&client.get_tx_out(txid, vout)?)?
         }
         Methods::GetTxOutProof { txids, blockhash } => {
-            serde_json::to_string_pretty(&client.get_txout_proof(txids, blockhash))?
+            serde_json::to_string_pretty(&client.get_txout_proof(txids, blockhash)?)?
         }
         Methods::GetTransaction { txid, .. } => {
             serde_json::to_string_pretty(&client.get_transaction(txid, Some(true))?)?
@@ -92,13 +91,9 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
         }
         Methods::GetRoots => serde_json::to_string_pretty(&client.get_roots()?)?,
         Methods::GetBlock { hash, verbosity } => {
-            let block = client.get_block(hash, verbosity)?;
-
-            match block {
-                GetBlockRes::Verbose(block) => serde_json::to_string_pretty(&block)?,
-                GetBlockRes::Serialized(block) => serde_json::to_string_pretty(&block)?,
-            }
+            serde_json::to_string_pretty(&client.get_block(hash, verbosity)?)?
         }
+
         Methods::GetPeerInfo => serde_json::to_string_pretty(&client.get_peer_info()?)?,
         Methods::Stop => serde_json::to_string_pretty(&client.stop()?)?,
         Methods::AddNode {

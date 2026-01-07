@@ -24,10 +24,10 @@ use super::res::GetBlockchainInfoRes;
 use super::res::GetTxOutProof;
 use super::res::JsonRpcError;
 use super::server::RpcChain;
-use super::server::RpcImpl;
+use super::server::RpcServer;
 use crate::json_rpc::res::RescanConfidence;
 
-impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+impl<Blockchain: RpcChain> RpcServer<Blockchain> {
     async fn get_block_inner(&self, hash: BlockHash) -> Result<Block, JsonRpcError> {
         let is_genesis = self.chain.get_block_hash(0).unwrap().eq(&hash);
 
@@ -97,7 +97,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     ) -> Result<u32, JsonRpcError> {
         /// Simple helper to avoid code reuse.
         fn get_block_time<BlockChain: RpcChain>(
-            provider: &RpcImpl<BlockChain>,
+            provider: &RpcServer<BlockChain>,
             at: u32,
         ) -> Result<u32, JsonRpcError> {
             let hash = provider.get_block_hash(at)?;
@@ -155,7 +155,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 }
 
 // blockchain rpcs
-impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+impl<Blockchain: RpcChain> RpcServer<Blockchain> {
     // dumputxoutset
 
     // getbestblockhash

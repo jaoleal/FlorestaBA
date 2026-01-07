@@ -1080,6 +1080,7 @@ dependencies = [
  "floresta-common",
  "floresta-compact-filters",
  "floresta-electrum",
+ "floresta-rpc",
  "floresta-watch-only",
  "floresta-wire",
  "libc",

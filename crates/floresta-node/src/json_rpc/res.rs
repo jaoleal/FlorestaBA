@@ -244,6 +244,10 @@ pub struct GetBlockResVerbose {
     pub target: String,
 }
 
+pub enum RpcServerInternalError {
+    NoResponse,
+}
+
 #[derive(Debug)]
 pub enum JsonRpcError {
     /// There was a rescan request but we do not have any addresses in the watch-only wallet.

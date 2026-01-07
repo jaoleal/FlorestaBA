@@ -3,9 +3,9 @@ use serde::Serialize;
 
 use super::res::JsonRpcError;
 use super::server::RpcChain;
-use super::server::RpcImpl;
+use super::server::RpcServer;
 
-impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+impl<Blockchain: RpcChain> RpcServer<Blockchain> {
     pub(super) fn get_memory_info(&self, mode: &str) -> Result<GetMemInfoRes, JsonRpcError> {
         #[cfg(target_env = "gnu")]
         match mode {

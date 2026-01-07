@@ -467,7 +467,7 @@ impl Florestad {
         // JSON-RPC
         #[cfg(feature = "json-rpc")]
         {
-            let server = tokio::spawn(json_rpc::server::RpcImpl::create(
+            let server = tokio::spawn(json_rpc::server::RpcServer::create(
                 blockchain_state.clone(),
                 wallet.clone(),
                 chain_provider.get_handle(),

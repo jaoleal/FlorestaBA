@@ -25,6 +25,9 @@ use floresta_chain::ThreadSafeChain;
 use floresta_common::parse_descriptors;
 use floresta_compact_filters::flat_filters_store::FlatFiltersStore;
 use floresta_compact_filters::network_filters::NetworkFilters;
+use floresta_rpc::rpc::FlorestaJsonRPC;
+use floresta_rpc::rpc::RpcResult;
+use floresta_rpc::rpc_types::Error;
 use floresta_watch_only::kv_database::KvDatabase;
 use floresta_watch_only::AddressCache;
 use floresta_watch_only::CachedTransaction;
@@ -68,7 +71,7 @@ pub trait RpcChain: ThreadSafeChain + Clone {}
 
 impl<T> RpcChain for T where T: ThreadSafeChain + Clone {}
 
-pub struct RpcImpl<Blockchain: RpcChain> {
+pub struct RpcServer<Blockchain: RpcChain> {
     pub(super) block_filter_storage: Option<Arc<NetworkFilters<FlatFiltersStore>>>,
     pub(super) network: Network,
     pub(super) chain: Blockchain,
@@ -82,7 +85,7 @@ pub struct RpcImpl<Blockchain: RpcChain> {
 
 type Result<T> = std::result::Result<T, JsonRpcError>;
 
-impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+impl<Blockchain: RpcChain> RpcServer<Blockchain> {
     async fn add_node(&self, node: String, command: String, v2transport: bool) -> Result<Value> {
         let node = node.split(':').collect::<Vec<&str>>();
         let (ip, port) = if node.len() == 2 {
@@ -236,8 +239,8 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
 async fn handle_json_rpc_request(
     req: RpcRequest,
-    state: Arc<RpcImpl<impl RpcChain>>,
-) -> Result<serde_json::Value> {
+    state: Arc<RpcServer<impl RpcChain>>,
+) -> RpcResult<serde_json::Value> {
     let RpcRequest {
         jsonrpc,
         method,
@@ -247,7 +250,7 @@ async fn handle_json_rpc_request(
 
     if let Some(version) = jsonrpc {
         if !["1.0", "2.0"].contains(&version.as_str()) {
-            return Err(JsonRpcError::InvalidRequest);
+            return Err(Error::Internal(JsonRpcError::InvalidRequest.to_string()));
         }
     }
 
@@ -261,10 +264,7 @@ async fn handle_json_rpc_request(
 
     match method.as_str() {
         // blockchain
-        "getbestblockhash" => {
-            let hash = state.get_best_block_hash()?;
-            Ok(serde_json::to_value(hash).unwrap())
-        }
+        "getbestblockhash" => state.get_best_block_hash()?,
 
         "getblock" => {
             let hash = get_hash(&params, 0, "block_hash")?;
@@ -285,7 +285,7 @@ async fn handle_json_rpc_request(
                     Ok(serde_json::to_value(block).unwrap())
                 }
 
-                _ => Err(JsonRpcError::InvalidVerbosityLevel),
+                _ => Err(Error::InvalidVerbosity),
             }
         }
 
@@ -408,11 +408,7 @@ async fn handle_json_rpc_request(
                 .map(|v| serde_json::to_value(v).unwrap())
         }
 
-        "ping" => {
-            state.ping().await?;
-
-            Ok(serde_json::json!(null))
-        }
+        "ping" => state.ping().await?,
 
         // wallet
         "loaddescriptor" => {
@@ -532,7 +528,7 @@ fn get_json_rpc_error_code(err: &JsonRpcError) -> i32 {
 }
 
 async fn json_rpc_request(
-    State(state): State<Arc<RpcImpl<impl RpcChain>>>,
+    State(state): State<Arc<RpcServer<impl RpcChain>>>,
     Json(req): Json<RpcRequest>,
 ) -> axum::http::Response<axum::body::Body> {
     debug!("Received JSON-RPC request: {req:?}");
@@ -579,13 +575,13 @@ async fn json_rpc_request(
     }
 }
 
-async fn cannot_get(_state: State<Arc<RpcImpl<impl RpcChain>>>) -> Json<serde_json::Value> {
+async fn cannot_get(_state: State<Arc<RpcServer<impl RpcChain>>>) -> Json<serde_json::Value> {
     Json(json!({
         "error": "Cannot get on this route",
     }))
 }
 
-impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+impl<Blockchain: RpcChain> RpcServer<Blockchain> {
     async fn rescan_with_block_filters(
         addresses: Vec<ScriptBuf>,
         chain: Blockchain,
@@ -779,7 +775,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
                     .allow_private_network(true)
                     .allow_methods([Method::POST, Method::HEAD]),
             )
-            .with_state(Arc::new(RpcImpl {
+            .with_state(Arc::new(RpcServer {
                 chain,
                 wallet,
                 node,

@@ -37,8 +37,8 @@ mod tests {
     use rcgen::CertifiedKey;
 
     use crate::jsonrpc_client::Client;
-    use crate::rpc::FlorestaRPC;
-    use crate::rpc_types::GetBlockRes;
+    use crate::rpc::FlorestaJsonRPC;
+    use crate::rpc_types::GetBlock;
 
     struct Florestad {
         proc: Child,
@@ -172,14 +172,17 @@ mod tests {
     fn test_get_best_block_hash() {
         let (_proc, client) = start_florestad();
 
-        let blockhash = client.get_best_block_hash().expect("rpc not working");
+        let expected_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+            .parse()
+            .unwrap();
 
-        assert_eq!(
-            blockhash,
-            "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
-                .parse()
-                .unwrap()
-        );
+        let got_blockhash = client
+            .get_best_block_hash()
+            .expect("rpc not working")
+            .block_hash()
+            .expect("Error while Processing the rpc");
+
+        assert_eq!(got_blockhash, expected_blockhash);
     }
 
     #[test]
@@ -192,8 +195,8 @@ mod tests {
                 .unwrap();
 
         let block = client.get_block(block_hash, Some(1)).unwrap();
-        let GetBlockRes::Verbose(block) = block else {
-            panic!("Expected verbose block");
+        let GetBlock::One(block) = block else {
+            panic!("Expected verbose 1 block");
         };
 
         assert_eq!(
@@ -206,45 +209,62 @@ mod tests {
     fn test_get_block_hash() {
         let (_proc, client) = start_florestad();
 
-        let blockhash = client.get_block_hash(0).expect("rpc not working");
+        let expected_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+            .parse()
+            .unwrap();
 
-        assert_eq!(
-            blockhash,
-            "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
-                .parse()
-                .unwrap()
-        );
+        let got_blockhash = client
+            .get_block_hash(0)
+            .expect("rpc not working")
+            .block_hash()
+            .expect("Error while Processing the rpc");
+
+        assert_eq!(got_blockhash, expected_blockhash);
     }
 
     #[test]
     fn test_get_block_header() {
         let (_proc, client) = start_florestad();
 
-        let blockhash = client.get_block_hash(0).expect("rpc not working");
-        let block_header = client.get_block_header(blockhash).expect("rpc not working");
+        let target_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+            .parse()
+            .unwrap();
 
-        assert_eq!(block_header.block_hash(), blockhash);
+        let got_header = client
+            .get_block_header(target_blockhash)
+            .expect("rpc not working")
+            .block_header()
+            .expect("Error while Processing the rpc")
+            .block_hash();
+
+        assert_eq!(got_header, target_blockhash);
     }
 
     #[test]
     fn test_get_height() {
         let (_proc, client) = start_florestad();
 
-        let height = client.get_block_count().unwrap();
-        assert_eq!(height, 0);
+        let got_height = client.get_block_count().expect("rpc not working").0;
+
+        assert_eq!(got_height, 0);
     }
 
     #[test]
     fn test_send_raw_transaction() {
         let (_proc, client) = start_florestad();
 
-        let tx = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000".to_string();
+        let expected_tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000".to_string();
 
-        let res = client.send_raw_transaction(tx).unwrap();
-        assert_eq!(
-            res,
+        let got_txid = client
+            .send_raw_transaction(expected_tx_hex)
+            .expect("rpc not working")
+            .txid()
+            .expect("Error while Processing the rpc");
+
+        let expected_txid =
             Txid::from_str("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
-                .unwrap()
-        );
+                .unwrap();
+
+        assert_eq!(got_txid, expected_txid);
     }
 }
