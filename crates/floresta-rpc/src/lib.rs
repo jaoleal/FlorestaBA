@@ -105,11 +105,12 @@ mod tests {
         let client = Client::new(format!("http://127.0.0.1:{port}"));
 
         let mut retries = 10;
+        let rt = tokio::runtime::Runtime::new().unwrap();
         loop {
             // Wait some time for florestad to start
             sleep(Duration::from_secs(3));
 
-            match client.uptime() {
+            match rt.block_on(client.uptime()) {
                 Ok(_) => break,
                 Err(_) if retries > 1 => retries -= 1,
                 Err(e) => {
@@ -138,19 +139,19 @@ mod tests {
         port
     }
 
-    #[test]
-    fn test_stop() {
+    #[tokio::test]
+    async fn test_stop() {
         let (mut _proc, client) = start_florestad();
 
-        let stop = client.stop().expect("rpc not working");
+        let stop = client.stop().await.expect("rpc not working");
         assert_eq!(stop.as_str(), "Floresta stopping");
     }
 
-    #[test]
-    fn test_get_blockchaininfo() {
+    #[tokio::test]
+    async fn test_get_blockchaininfo() {
         let (_proc, client) = start_florestad();
 
-        let gbi = client.get_blockchain_info().expect("rpc not working");
+        let gbi = client.get_blockchain_info().await.expect("rpc not working");
 
         assert_eq!(gbi.height, 0);
         assert_eq!(gbi.chain, "regtest".to_owned());
@@ -159,17 +160,17 @@ mod tests {
         assert_eq!(gbi.root_hashes, Vec::<String>::new());
     }
 
-    #[test]
-    fn test_get_roots() {
+    #[tokio::test]
+    async fn test_get_roots() {
         let (_proc, client) = start_florestad();
 
-        let gbi = client.get_blockchain_info().expect("rpc not working");
+        let gbi = client.get_blockchain_info().await.expect("rpc not working");
 
         assert_eq!(gbi.root_hashes, Vec::<String>::new());
     }
 
-    #[test]
-    fn test_get_best_block_hash() {
+    #[tokio::test]
+    async fn test_get_best_block_hash() {
         let (_proc, client) = start_florestad();
 
         let expected_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
@@ -178,6 +179,7 @@ mod tests {
 
         let got_blockhash = client
             .get_best_block_hash()
+            .await
             .expect("rpc not working")
             .block_hash()
             .expect("Error while Processing the rpc");
@@ -185,8 +187,8 @@ mod tests {
         assert_eq!(got_blockhash, expected_blockhash);
     }
 
-    #[test]
-    fn test_get_block() {
+    #[tokio::test]
+    async fn test_get_block() {
         let (_proc, client) = start_florestad();
 
         let block_hash: BlockHash =
@@ -194,7 +196,7 @@ mod tests {
                 .parse()
                 .unwrap();
 
-        let block = client.get_block(block_hash, Some(1)).unwrap();
+        let block = client.get_block(block_hash, Some(1)).await.unwrap();
         let GetBlock::One(block) = block else {
             panic!("Expected verbose 1 block");
         };
@@ -205,8 +207,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_get_block_hash() {
+    #[tokio::test]
+    async fn test_get_block_hash() {
         let (_proc, client) = start_florestad();
 
         let expected_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
@@ -215,6 +217,7 @@ mod tests {
 
         let got_blockhash = client
             .get_block_hash(0)
+            .await
             .expect("rpc not working")
             .block_hash()
             .expect("Error while Processing the rpc");
@@ -222,8 +225,8 @@ mod tests {
         assert_eq!(got_blockhash, expected_blockhash);
     }
 
-    #[test]
-    fn test_get_block_header() {
+    #[tokio::test]
+    async fn test_get_block_header() {
         let (_proc, client) = start_florestad();
 
         let target_blockhash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
@@ -232,6 +235,7 @@ mod tests {
 
         let got_header = client
             .get_block_header(target_blockhash)
+            .await
             .expect("rpc not working")
             .block_header()
             .expect("Error while Processing the rpc")
@@ -240,23 +244,24 @@ mod tests {
         assert_eq!(got_header, target_blockhash);
     }
 
-    #[test]
-    fn test_get_height() {
+    #[tokio::test]
+    async fn test_get_height() {
         let (_proc, client) = start_florestad();
 
-        let got_height = client.get_block_count().expect("rpc not working").0;
+        let got_height = client.get_block_count().await.expect("rpc not working").0;
 
         assert_eq!(got_height, 0);
     }
 
-    #[test]
-    fn test_send_raw_transaction() {
+    #[tokio::test]
+    async fn test_send_raw_transaction() {
         let (_proc, client) = start_florestad();
 
         let expected_tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000".to_string();
 
         let got_txid = client
             .send_raw_transaction(expected_tx_hex)
+            .await
             .expect("rpc not working")
             .txid()
             .expect("Error while Processing the rpc");

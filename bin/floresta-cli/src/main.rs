@@ -20,8 +20,11 @@ fn main() -> anyhow::Result<()> {
     // Create a new JSON-RPC client using the host from the CLI arguments
     let client = Client::new(get_host(&cli));
 
+    // Create a runtime to execute async code
+    let rt = tokio::runtime::Runtime::new()?;
+    
     // Perform the requested RPC call and get the result
-    let res = do_request(&cli, client)?;
+    let res = rt.block_on(do_request(&cli, client))?;
 
     // Print the result to the console
     println!("{res}");
@@ -51,23 +54,23 @@ fn get_host(cmd: &Cli) -> String {
 }
 
 // Function to perform the requested RPC call based on CLI arguments
-fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
+async fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
     Ok(match cmd.methods.clone() {
         // Handle each possible RPC method and serialize the result to a pretty JSON string
-        Methods::GetBlockchainInfo => serde_json::to_string_pretty(&client.get_blockchain_info()?)?,
+        Methods::GetBlockchainInfo => serde_json::to_string_pretty(&client.get_blockchain_info().await?)?,
         Methods::GetBlockHash { height } => {
-            serde_json::to_string_pretty(&client.get_block_hash(height)?)?
+            serde_json::to_string_pretty(&client.get_block_hash(height).await?)?
         }
-        Methods::GetBestBlockHash => serde_json::to_string_pretty(&client.get_best_block_hash()?)?,
-        Methods::GetBlockCount => serde_json::to_string_pretty(&client.get_block_count()?)?,
+        Methods::GetBestBlockHash => serde_json::to_string_pretty(&client.get_best_block_hash().await?)?,
+        Methods::GetBlockCount => serde_json::to_string_pretty(&client.get_block_count().await?)?,
         Methods::GetTxOut { txid, vout } => {
-            serde_json::to_string_pretty(&client.get_tx_out(txid, vout)?)?
+            serde_json::to_string_pretty(&client.get_tx_out(txid, vout).await?)?
         }
         Methods::GetTxOutProof { txids, blockhash } => {
-            serde_json::to_string_pretty(&client.get_txout_proof(txids, blockhash)?)?
+            serde_json::to_string_pretty(&client.get_txout_proof(txids, blockhash).await?)?
         }
         Methods::GetTransaction { txid, .. } => {
-            serde_json::to_string_pretty(&client.get_transaction(txid, Some(true))?)?
+            serde_json::to_string_pretty(&client.get_transaction(txid, Some(true)).await?)?
         }
         Methods::RescanBlockchain {
             start_block,
@@ -79,30 +82,30 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
             Some(stop_block),
             use_timestamp,
             confidence,
-        )?)?,
+        ).await?)?,
         Methods::SendRawTransaction { tx } => {
-            serde_json::to_string_pretty(&client.send_raw_transaction(tx)?)?
+            serde_json::to_string_pretty(&client.send_raw_transaction(tx).await?)?
         }
         Methods::GetBlockHeader { hash } => {
-            serde_json::to_string_pretty(&client.get_block_header(hash)?)?
+            serde_json::to_string_pretty(&client.get_block_header(hash).await?)?
         }
         Methods::LoadDescriptor { desc } => {
-            serde_json::to_string_pretty(&client.load_descriptor(desc)?)?
+            serde_json::to_string_pretty(&client.load_descriptor(desc).await?)?
         }
-        Methods::GetRoots => serde_json::to_string_pretty(&client.get_roots()?)?,
+        Methods::GetRoots => serde_json::to_string_pretty(&client.get_roots().await?)?,
         Methods::GetBlock { hash, verbosity } => {
-            serde_json::to_string_pretty(&client.get_block(hash, verbosity)?)?
+            serde_json::to_string_pretty(&client.get_block(hash, verbosity).await?)?
         }
 
-        Methods::GetPeerInfo => serde_json::to_string_pretty(&client.get_peer_info()?)?,
-        Methods::Stop => serde_json::to_string_pretty(&client.stop()?)?,
+        Methods::GetPeerInfo => serde_json::to_string_pretty(&client.get_peer_info().await?)?,
+        Methods::Stop => serde_json::to_string_pretty(&client.stop().await?)?,
         Methods::AddNode {
             node,
             command,
             v2transport,
         } => {
             let transport = v2transport.unwrap_or(false);
-            serde_json::to_string_pretty(&client.add_node(node, command, transport)?)?
+            serde_json::to_string_pretty(&client.add_node(node, command, transport).await?)?
         }
 
         Methods::FindTxOut {
@@ -115,15 +118,15 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
             vout,
             script,
             height_hint.unwrap_or(0),
-        )?)?,
+        ).await?)?,
         Methods::GetMemoryInfo { mode } => {
             let mode = mode.unwrap_or("stats".to_string());
-            serde_json::to_string_pretty(&client.get_memory_info(mode)?)?
+            serde_json::to_string_pretty(&client.get_memory_info(mode).await?)?
         }
-        Methods::GetRpcInfo => serde_json::to_string_pretty(&client.get_rpc_info()?)?,
-        Methods::Uptime => serde_json::to_string_pretty(&client.uptime()?)?,
-        Methods::ListDescriptors => serde_json::to_string_pretty(&client.list_descriptors()?)?,
-        Methods::Ping => serde_json::to_string_pretty(&client.ping()?)?,
+        Methods::GetRpcInfo => serde_json::to_string_pretty(&client.get_rpc_info().await?)?,
+        Methods::Uptime => serde_json::to_string_pretty(&client.uptime().await?)?,
+        Methods::ListDescriptors => serde_json::to_string_pretty(&client.list_descriptors().await?)?,
+        Methods::Ping => serde_json::to_string_pretty(&client.ping().await?)?,
     })
 }
 
