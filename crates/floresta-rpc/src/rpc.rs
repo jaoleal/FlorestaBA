@@ -41,14 +41,14 @@ pub type RpcResult<T> = std::result::Result<T, Error>;
 ///
 /// I know thats ugly but it should help a lot finding references in the code just by keeping
 /// the method name the same as the command.
-pub trait FlorestaJsonRPC {
+pub trait FlorestaRPC {
     /// Get the BIP158 filter for a given block height
     ///
     /// BIP158 filters are a compact representation of the set of transactions in a block,
     /// designed for efficient light client synchronization. This method returns the filter
     /// for a given block height, encoded as a hexadecimal string.
     /// You need to have enabled block filters by setting the `blockfilters=1` option
-    fn get_block_filter(&self, _height: u32) -> RpcResult<String> {
+    async fn get_block_filter(&self, _height: u32) -> RpcResult<String> {
         Err(Error::NotImplemented)
     }
 
@@ -57,12 +57,12 @@ pub trait FlorestaJsonRPC {
     /// This method returns a bunch of information about the chain we are on, including
     /// the current height, the best block hash, the difficulty, and whether we are
     /// currently in IBD (Initial Block Download) mode.
-    fn get_blockchain_info(&self) -> RpcResult<GetBlockchainInfoRes> {
+    async fn get_blockchain_info(&self) -> RpcResult<GetBlockchainInfoRes> {
         Err(Error::NotImplemented)
     }
 
     /// Returns the hash of the best (tip) block in the most-work fully-validated chain.
-    fn get_best_block_hash(&self) -> RpcResult<GetBestBlockHash> {
+    async fn get_best_block_hash(&self) -> RpcResult<GetBestBlockHash> {
         Err(Error::NotImplemented)
     }
 
@@ -70,7 +70,7 @@ pub trait FlorestaJsonRPC {
     ///
     /// This method returns the hash of the block at the given height. If the height is
     /// invalid, an error is returned.
-    fn get_block_hash(&self, _height: u32) -> RpcResult<GetBlockHash> {
+    async fn get_block_hash(&self, _height: u32) -> RpcResult<GetBlockHash> {
         Err(Error::NotImplemented)
     }
 
@@ -80,7 +80,7 @@ pub trait FlorestaJsonRPC {
     /// in the Bitcoin protocol specification. A header contains the block's version,
     /// the previous block hash, the merkle root, the timestamp, the difficulty target,
     /// and the nonce.
-    fn get_block_header(&self, _hash: BlockHash) -> RpcResult<GetBlockHeader> {
+    async fn get_block_header(&self, _hash: BlockHash) -> RpcResult<GetBlockHeader> {
         Err(Error::NotImplemented)
     }
 
@@ -89,7 +89,7 @@ pub trait FlorestaJsonRPC {
     /// This method returns a transaction that's cached in our wallet. If the verbosity flag is
     /// set to false, the transaction is returned as a hexadecimal string. If the verbosity
     /// flag is set to true, the transaction is returned as a json object.
-    fn get_transaction(&self, _tx_id: Txid, _verbosity: Option<bool>) -> RpcResult<GetTransaction> {
+    async fn get_transaction(&self, _tx_id: Txid, _verbosity: Option<bool>) -> RpcResult<GetTransaction> {
         Err(Error::NotImplemented)
     }
 
@@ -97,7 +97,7 @@ pub trait FlorestaJsonRPC {
     ///
     /// This method returns the Merkle proof, showing that a transaction was included in a block.
     /// The pooof is returned as a vector hexadecimal string.
-    fn get_txout_proof(
+    async fn get_txout_proof(
         &self,
         _txids: Vec<Txid>,
         _blockhash: Option<BlockHash>,
@@ -112,12 +112,12 @@ pub trait FlorestaJsonRPC {
     /// compact block filters enabled, this process will be much faster and use less bandwidth.
     /// The rescan parameter is the height at which to start the rescan, and should be at least
     /// as old as the oldest transaction this descriptor could have been used in.
-    fn load_descriptor(&self, _descriptor: String) -> RpcResult<bool> {
+    async fn load_descriptor(&self, _descriptor: String) -> RpcResult<bool> {
         Err(Error::NotImplemented)
     }
 
     #[doc = include_str!("../../../doc/rpc/rescanblockchain.md")]
-    fn rescanblockchain(
+    async fn rescanblockchain(
         &self,
         _start_block: Option<u32>,
         _stop_block: Option<u32>,
@@ -128,7 +128,7 @@ pub trait FlorestaJsonRPC {
     }
 
     /// Returns the current height of the blockchain
-    fn get_block_count(&self) -> RpcResult<GetBlockCount> {
+    async fn get_block_count(&self) -> RpcResult<GetBlockCount> {
         Err(Error::NotImplemented)
     }
 
@@ -137,7 +137,7 @@ pub trait FlorestaJsonRPC {
     /// This method sends a transaction to the network. The transaction should be encoded as a
     /// hexadecimal string. If the transaction is valid, it will be broadcast to the network, and
     /// return the transaction id. If the transaction is invalid, an error will be returned.
-    fn send_raw_transaction(&self, _tx: String) -> RpcResult<SendRawTransaction> {
+    async fn send_raw_transaction(&self, _tx: String) -> RpcResult<SendRawTransaction> {
         Err(Error::NotImplemented)
     }
 
@@ -146,7 +146,7 @@ pub trait FlorestaJsonRPC {
     /// This method returns the current accumulator for the chain we're on. The accumulator is
     /// a set of roots, that let's us prove that a UTXO exists in the chain. This method returns
     /// a vector of hexadecimal strings, each of which is a root in the accumulator.
-    fn get_roots(&self) -> RpcResult<Vec<String>> {
+    async fn get_roots(&self) -> RpcResult<Vec<String>> {
         Err(Error::NotImplemented)
     }
 
@@ -155,7 +155,7 @@ pub trait FlorestaJsonRPC {
     /// This method returns information about the peers we're connected with. This includes
     /// the peer's IP address, the peer's version, the peer's user agent, the transport protocol
     /// and the peer's current height.
-    fn get_peer_info(&self) -> RpcResult<Vec<PeerInfo>> {
+    async fn get_peer_info(&self) -> RpcResult<Vec<PeerInfo>> {
         Err(Error::NotImplemented)
     }
 
@@ -164,7 +164,7 @@ pub trait FlorestaJsonRPC {
     /// This method returns a block, given a block hash. If the verbosity flag is 0, the block
     /// is returned as a hexadecimal string. If the verbosity flag is 1, the block is returned
     /// as a json object.
-    fn get_block(&self, _hash: BlockHash, _verbosity: Option<u32>) -> RpcResult<GetBlock> {
+    async fn get_block(&self, _hash: BlockHash, _verbosity: Option<u32>) -> RpcResult<GetBlock> {
         Err(Error::NotImplemented)
     }
 
@@ -173,14 +173,14 @@ pub trait FlorestaJsonRPC {
     /// This method returns a cached transaction output. If the output is not in the cache,
     /// or is spent, an empty object is returned. If you want to find a utxo that's not in
     /// the cache, you can use the findtxout method.
-    fn get_tx_out(&self, _tx_id: Txid, _outpoint: u32) -> RpcResult<GetTxOut> {
+    async fn get_tx_out(&self, _tx_id: Txid, _outpoint: u32) -> RpcResult<GetTxOut> {
         Err(Error::NotImplemented)
     }
 
     /// Stops the florestad process
     ///
     /// This can be used to gracefully stop the florestad process.
-    fn stop(&self) -> RpcResult<String> {
+    async fn stop(&self) -> RpcResult<String> {
         Err(Error::NotImplemented)
     }
 
@@ -190,7 +190,7 @@ pub trait FlorestaJsonRPC {
     /// If the `v2transport` option is set, we won't retry connecting using the old, unencrypted
     /// P2P protocol.
     #[doc = include_str!("../../../doc/rpc/addnode.md")]
-    fn add_node(
+    async fn add_node(
         &self,
         _node: String,
         _command: AddNodeCommand,
@@ -204,7 +204,7 @@ pub trait FlorestaJsonRPC {
     /// You can use this to look for a utxo. If it exists, it will return the amount and
     /// scriptPubKey of this utxo. It returns an empty object if the utxo doesn't exist.
     /// You must have enabled block filters by setting the `blockfilters=1` option.
-    fn find_tx_out(
+    async fn find_tx_out(
         &self,
         _tx_id: Txid,
         _outpoint: u32,
@@ -217,22 +217,22 @@ pub trait FlorestaJsonRPC {
     /// Returns statistics about Floresta's memory usage.
     ///
     /// Returns zeroed values for all runtimes that are not *-gnu or MacOS.
-    fn get_memory_info(&self, _mode: String) -> RpcResult<GetMemInfoRes> {
+    async fn get_memory_info(&self, _mode: String) -> RpcResult<GetMemInfoRes> {
         Err(Error::NotImplemented)
     }
 
     /// Returns stats about our RPC server
-    fn get_rpc_info(&self) -> RpcResult<GetRpcInfo> {
+    async fn get_rpc_info(&self) -> RpcResult<GetRpcInfo> {
         Err(Error::NotImplemented)
     }
 
     /// Returns for how long florestad has been running, in seconds
-    fn uptime(&self) -> RpcResult<u32> {
+    async fn uptime(&self) -> RpcResult<u32> {
         Err(Error::NotImplemented)
     }
 
     /// Returns a list of all descriptors currently loaded in the wallet
-    fn list_descriptors(&self) -> RpcResult<Vec<String>> {
+    async fn list_descriptors(&self) -> RpcResult<Vec<String>> {
         Err(Error::NotImplemented)
     }
 
@@ -254,8 +254,8 @@ pub trait JsonRPCClient: Sized {
         T: for<'a> serde::de::Deserialize<'a> + serde::de::DeserializeOwned + Debug;
 }
 
-impl<T: JsonRPCClient> FlorestaJsonRPC for T {
-    fn find_tx_out(
+impl<T: JsonRPCClient> FlorestaRPC for T {
+    async fn find_tx_out(
         &self,
         tx_id: Txid,
         outpoint: u32,
@@ -273,19 +273,19 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         )
     }
 
-    fn uptime(&self) -> RpcResult<u32> {
+    async fn uptime(&self) -> RpcResult<u32> {
         self.call("uptime", &[])
     }
 
-    fn get_memory_info(&self, mode: String) -> RpcResult<GetMemInfoRes> {
+    async fn get_memory_info(&self, mode: String) -> RpcResult<GetMemInfoRes> {
         self.call("getmemoryinfo", &[Value::String(mode)])
     }
 
-    fn get_rpc_info(&self) -> RpcResult<GetRpcInfo> {
+    async fn get_rpc_info(&self) -> RpcResult<GetRpcInfo> {
         self.call("getrpcinfo", &[])
     }
 
-    fn add_node(
+    async fn add_node(
         &self,
         node: String,
         command: AddNodeCommand,
@@ -301,11 +301,11 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         )
     }
 
-    fn stop(&self) -> RpcResult<String> {
+    async fn stop(&self) -> RpcResult<String> {
         self.call("stop", &[])
     }
 
-    fn rescanblockchain(
+    async fn rescanblockchain(
         &self,
         start_height: Option<u32>,
         stop_height: Option<u32>,
@@ -327,11 +327,11 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         )
     }
 
-    fn get_roots(&self) -> RpcResult<Vec<String>> {
+    async fn get_roots(&self) -> RpcResult<Vec<String>> {
         self.call("getroots", &[])
     }
 
-    fn get_block(&self, hash: BlockHash, verbosity: Option<u32>) -> RpcResult<GetBlock> {
+    async fn get_block(&self, hash: BlockHash, verbosity: Option<u32>) -> RpcResult<GetBlock> {
         let verbosity = verbosity.unwrap_or(0);
         self.call(
             "getblock",
@@ -342,11 +342,11 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         )
     }
 
-    fn get_block_count(&self) -> RpcResult<GetBlockCount> {
+    async fn get_block_count(&self) -> RpcResult<GetBlockCount> {
         self.call("getblockcount", &[])
     }
 
-    fn get_tx_out(&self, tx_id: Txid, outpoint: u32) -> RpcResult<GetTxOut> {
+    async fn get_tx_out(&self, tx_id: Txid, outpoint: u32) -> RpcResult<GetTxOut> {
         let result: serde_json::Value = self.call(
             "gettxout",
             &[
@@ -360,7 +360,7 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         serde_json::from_value(result).map_err(Error::Serde)
     }
 
-    fn get_txout_proof(
+    async fn get_txout_proof(
         &self,
         txids: Vec<Txid>,
         blockhash: Option<BlockHash>,
@@ -380,19 +380,19 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         self.call("gettxoutproof", &params)
     }
 
-    fn get_peer_info(&self) -> RpcResult<Vec<PeerInfo>> {
+    async fn get_peer_info(&self) -> RpcResult<Vec<PeerInfo>> {
         self.call("getpeerinfo", &[])
     }
 
-    fn get_best_block_hash(&self) -> RpcResult<GetBestBlockHash> {
+    async fn get_best_block_hash(&self) -> RpcResult<GetBestBlockHash> {
         self.call("getbestblockhash", &[])
     }
 
-    fn get_block_hash(&self, height: u32) -> RpcResult<GetBlockHash> {
+    async fn get_block_hash(&self, height: u32) -> RpcResult<GetBlockHash> {
         self.call("getblockhash", &[Value::Number(Number::from(height))])
     }
 
-    fn get_transaction(&self, tx_id: Txid, verbosity: Option<bool>) -> RpcResult<GetTransaction> {
+    async fn get_transaction(&self, tx_id: Txid, verbosity: Option<bool>) -> RpcResult<GetTransaction> {
         let verbosity = verbosity.unwrap_or(false);
         self.call(
             "gettransaction",
@@ -400,27 +400,27 @@ impl<T: JsonRPCClient> FlorestaJsonRPC for T {
         )
     }
 
-    fn load_descriptor(&self, descriptor: String) -> RpcResult<bool> {
+    async fn load_descriptor(&self, descriptor: String) -> RpcResult<bool> {
         self.call("loaddescriptor", &[Value::String(descriptor)])
     }
 
-    fn get_block_filter(&self, height: u32) -> RpcResult<String> {
+    async fn get_block_filter(&self, height: u32) -> RpcResult<String> {
         self.call("getblockfilter", &[Value::Number(Number::from(height))])
     }
 
-    fn get_block_header(&self, hash: BlockHash) -> RpcResult<GetBlockHeader> {
+    async fn get_block_header(&self, hash: BlockHash) -> RpcResult<GetBlockHeader> {
         self.call("getblockheader", &[Value::String(hash.to_string())])
     }
 
-    fn get_blockchain_info(&self) -> RpcResult<GetBlockchainInfoRes> {
+    async fn get_blockchain_info(&self) -> RpcResult<GetBlockchainInfoRes> {
         self.call("getblockchaininfo", &[])
     }
 
-    fn send_raw_transaction(&self, tx: String) -> RpcResult<SendRawTransaction> {
+    async fn send_raw_transaction(&self, tx: String) -> RpcResult<SendRawTransaction> {
         self.call("sendrawtransaction", &[Value::String(tx)])
     }
 
-    fn list_descriptors(&self) -> RpcResult<Vec<String>> {
+    async fn list_descriptors(&self) -> RpcResult<Vec<String>> {
         self.call("listdescriptors", &[])
     }
 

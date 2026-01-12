@@ -25,7 +25,7 @@ use floresta_chain::ThreadSafeChain;
 use floresta_common::parse_descriptors;
 use floresta_compact_filters::flat_filters_store::FlatFiltersStore;
 use floresta_compact_filters::network_filters::NetworkFilters;
-use floresta_rpc::rpc::FlorestaJsonRPC;
+use floresta_rpc::rpc::FlorestaRPC;
 use floresta_rpc::rpc::RpcResult;
 use floresta_rpc::rpc_types::Error;
 use floresta_watch_only::kv_database::KvDatabase;
