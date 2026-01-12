@@ -1,7 +1,16 @@
 use std::fmt::Display;
 
+use corepc_types::v30::GetBlockVerboseOne;
+use corepc_types::v30::GetBlockVerboseZero;
 use serde::Deserialize;
 use serde::Serialize;
+
+#[derive(Debug, Deserialize, Serialize)]
+/// Enum holding the possibilitty to contain `GetBlockVerboseOne` or `GetBlockVerboseZero`
+pub enum GetBlock {
+    One(GetBlockVerboseOne),
+    Two(GetBlockVerboseZero),
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 /// Return type for the `gettxoutproof` rpc command, the internal is
@@ -313,7 +322,7 @@ pub enum Error {
     JsonRpc(jsonrpc::Error),
 
     /// An error internal to our jsonrpc server
-    Api(serde_json::Value),
+    Internal(String),
 
     /// The server sent an empty response
     EmptyResponse,
@@ -326,6 +335,9 @@ pub enum Error {
 
     /// The requested transaction output was not found
     TxOutNotFound,
+
+    /// Returned in every default implementation of `FlorestaJsonRpc`
+    NotImplemented,
 }
 
 impl From<serde_json::Error> for Error {
@@ -346,12 +358,13 @@ impl Display for Error {
         match self {
             #[cfg(feature = "with-jsonrpc")]
             Error::JsonRpc(e) => write!(f, "JsonRpc returned an error {e}"),
-            Error::Api(e) => write!(f, "general jsonrpc error: {e}"),
+            Error::Internal(e) => write!(f, "Internal Server error: {e}"),
             Error::Serde(e) => write!(f, "error while deserializing the response: {e}"),
             Error::EmptyResponse => write!(f, "got an empty response from server"),
             Error::InvalidVerbosity => write!(f, "invalid verbosity level"),
             Error::InvalidRescanVal => write!(f, "Invalid rescan values"),
             Error::TxOutNotFound => write!(f, "Transaction output was not found"),
+            Error::NotImplemented => write!(f, "This command is not Implemented"),
         }
     }
 }
