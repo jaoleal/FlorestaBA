@@ -8,7 +8,7 @@ use bitcoin::Txid;
 use clap::Parser;
 use clap::Subcommand;
 use floresta_rpc::jsonrpc_client::Client;
-use floresta_rpc::rpc::FlorestaJsonRPC;
+use floresta_rpc::rpc::FlorestaRPC;
 use floresta_rpc::rpc_types::AddNodeCommand;
 use floresta_rpc::rpc_types::RescanConfidence;
 

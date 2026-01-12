@@ -37,7 +37,7 @@ mod tests {
     use rcgen::CertifiedKey;
 
     use crate::jsonrpc_client::Client;
-    use crate::rpc::FlorestaJsonRPC;
+    use crate::rpc::FlorestaRPC;
     use crate::rpc_types::GetBlock;
 
     struct Florestad {
