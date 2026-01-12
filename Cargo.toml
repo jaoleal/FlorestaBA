@@ -44,6 +44,7 @@ readme = "README.md"
 # For exact versions when needed, use "=1.9.1"
 [workspace.dependencies]
 axum = "0.8"
+async-trait = "0.1"
 bitcoin = { version = "0.32", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 corepc-types = "0.11"

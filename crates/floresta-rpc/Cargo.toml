@@ -15,12 +15,14 @@ keywords = ["bitcoin", "utreexo", "node", "blockchain", "rust"]
 categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
 
 [dependencies]
+async-trait = { workspace = true }
 bitcoin = { workspace = true }
 clap = { workspace = true, optional = true }
 corepc-types = { workspace = true }
 jsonrpc = { version = "0.18", features = ["minreq_http"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
