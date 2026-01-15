@@ -1,12 +1,12 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::res::JsonRpcError;
 use super::server::RpcChain;
 use super::server::RpcImpl;
+use crate::json_rpc::server::RpcServerError;
 
 impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
-    pub(super) fn get_memory_info(&self, mode: &str) -> Result<GetMemInfoRes, JsonRpcError> {
+    pub(super) fn get_memory_info(&self, mode: &str) -> Result<GetMemInfoRes, RpcServerError> {
         #[cfg(target_env = "gnu")]
         match mode {
             "stats" => {
@@ -43,7 +43,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
                 Ok(GetMemInfoRes::MallocInfo(info_str))
             }
 
-            _ => Err(JsonRpcError::InvalidMemInfoMode),
+            _ => Err(RpcServerError::InvalidMemInfoMode),
         }
 
         #[cfg(target_os = "macos")]
@@ -87,7 +87,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
                 Ok(GetMemInfoRes::MallocInfo(info_str))
             }
-            _ => Err(JsonRpcError::InvalidMemInfoMode),
+            _ => Err(RpcServerError::InvalidMemInfoMode),
         }
 
         #[cfg(not(any(target_env = "gnu", target_os = "macos")))]
@@ -95,11 +95,11 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         match mode {
             "stats" => Ok(GetMemInfoRes::Stats(GetMemInfoStats::default())),
             "mallocinfo" => Ok(GetMemInfoRes::MallocInfo(String::new())),
-            _ => Err(JsonRpcError::InvalidMemInfoMode),
+            _ => Err(RpcServerError::InvalidMemInfoMode),
         }
     }
 
-    pub(super) async fn get_rpc_info(&self) -> Result<GetRpcInfoRes, JsonRpcError> {
+    pub(super) async fn get_rpc_info(&self) -> Result<GetRpcInfoRes, RpcServerError> {
         let active_commands = self
             .inflight
             .read()
@@ -121,7 +121,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     // logging
 
     // stop
-    pub(super) async fn stop(&self) -> Result<&str, JsonRpcError> {
+    pub(super) async fn stop(&self) -> Result<&str, RpcServerError> {
         *self.kill_signal.write().await = true;
 
         Ok("Floresta stopping")

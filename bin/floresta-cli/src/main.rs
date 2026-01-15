@@ -9,9 +9,9 @@ use clap::Parser;
 use clap::Subcommand;
 use floresta_rpc::jsonrpc_client::Client;
 use floresta_rpc::rpc::FlorestaRPC;
-use floresta_rpc::rpc_types::AddNodeCommand;
-use floresta_rpc::rpc_types::GetBlockRes;
-use floresta_rpc::rpc_types::RescanConfidence;
+use floresta_rpc::typed_commands::request::RescanConfidence;
+use floresta_rpc::typed_commands::response::AddNodeCommand;
+use floresta_rpc::typed_commands::response::GetBlockRes;
 
 // Main function that runs the CLI application
 fn main() -> anyhow::Result<()> {

@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use serde::Deserialize;
 
 use crate::rpc::JsonRPCClient;
+use crate::Error;
 
 // Define a Client struct that wraps a jsonrpc::Client
 #[derive(Debug)]
@@ -36,7 +37,7 @@ impl Client {
         &self,
         method: &str,
         params: &[serde_json::Value],
-    ) -> Result<Response, crate::rpc_types::Error>
+    ) -> Result<Response, Error>
     where
         Response: for<'a> serde::de::Deserialize<'a> + Debug,
     {
@@ -45,10 +46,7 @@ impl Client {
         // Build the RPC request
         let req = self.0.build_request(method, Some(&*raw));
         // Send the request and handle the response
-        let resp = self
-            .0
-            .send_request(req)
-            .map_err(crate::rpc_types::Error::from);
+        let resp = self.0.send_request(req).map_err(Error::from);
 
         // Deserialize and return the result
         Ok(resp?.result()?)
@@ -61,7 +59,7 @@ impl JsonRPCClient for Client {
         &self,
         method: &str,
         params: &[serde_json::Value],
-    ) -> Result<T, crate::rpc_types::Error> {
+    ) -> Result<T, Error> {
         self.rpc_call(method, params)
     }
 }

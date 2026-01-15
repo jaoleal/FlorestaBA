@@ -7,10 +7,16 @@ use corepc_types::v29::GetTxOut;
 use serde_json::Number;
 use serde_json::Value;
 
-use crate::rpc_types;
-use crate::rpc_types::*;
+use crate::typed_commands::request::RescanConfidence;
+use crate::typed_commands::response::AddNodeCommand;
+use crate::typed_commands::response::GetBlockRes;
+use crate::typed_commands::response::GetBlockchainInfoRes;
+use crate::typed_commands::response::GetMemInfoRes;
+use crate::typed_commands::response::GetRpcInfoRes;
+use crate::typed_commands::response::PeerInfo;
+use crate::Error;
 
-type Result<T> = std::result::Result<T, rpc_types::Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 /// A trait specifying all possible methods for floresta's json-rpc
 pub trait FlorestaRPC {
@@ -249,7 +255,7 @@ impl<T: JsonRPCClient> FlorestaRPC for T {
                 Ok(GetBlockRes::Verbose(block))
             }
 
-            _ => Err(rpc_types::Error::InvalidVerbosity),
+            _ => Err(Error::InvalidVerbosity),
         }
     }
 
