@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::net::SocketAddr;
 use std::slice;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::Method;
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Json;
 use axum::Router;
@@ -21,10 +23,28 @@ use bitcoin::ScriptBuf;
 use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
+use floresta_chain::extensions::HeaderExtError;
 use floresta_chain::ThreadSafeChain;
+use floresta_common::impl_error_from;
 use floresta_common::parse_descriptors;
 use floresta_compact_filters::flat_filters_store::FlatFiltersStore;
 use floresta_compact_filters::network_filters::NetworkFilters;
+use floresta_rpc::typed_commands::arg_parser::get_bool;
+use floresta_rpc::typed_commands::arg_parser::get_hash;
+use floresta_rpc::typed_commands::arg_parser::get_hashes_array;
+use floresta_rpc::typed_commands::arg_parser::get_numeric;
+use floresta_rpc::typed_commands::arg_parser::get_optional_field;
+use floresta_rpc::typed_commands::arg_parser::get_string;
+use floresta_rpc::typed_commands::request::RescanConfidence;
+use floresta_rpc::typed_commands::response::GetBlockRes;
+use floresta_rpc::typed_commands::response::RawTx;
+use floresta_rpc::typed_commands::response::ScriptPubKeyJson;
+use floresta_rpc::typed_commands::response::ScriptSigJson;
+use floresta_rpc::typed_commands::response::TxInJson;
+use floresta_rpc::typed_commands::response::TxOutJson;
+use floresta_rpc::typed_commands::ArgParseError;
+use floresta_rpc::typed_commands::JsonRequest;
+use floresta_rpc::typed_commands::RpcError;
 use floresta_watch_only::kv_database::KvDatabase;
 use floresta_watch_only::AddressCache;
 use floresta_watch_only::CachedTransaction;
@@ -37,23 +57,6 @@ use tower_http::cors::CorsLayer;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-
-use super::res::GetBlockRes;
-use super::res::JsonRpcError;
-use super::res::RawTxJson;
-use super::res::RpcError;
-use super::res::ScriptPubKeyJson;
-use super::res::ScriptSigJson;
-use super::res::TxInJson;
-use super::res::TxOutJson;
-use crate::json_rpc::request::arg_parser::get_bool;
-use crate::json_rpc::request::arg_parser::get_hash;
-use crate::json_rpc::request::arg_parser::get_hashes_array;
-use crate::json_rpc::request::arg_parser::get_numeric;
-use crate::json_rpc::request::arg_parser::get_optional_field;
-use crate::json_rpc::request::arg_parser::get_string;
-use crate::json_rpc::request::RpcRequest;
-use crate::json_rpc::res::RescanConfidence;
 
 pub(super) struct InflightRpc {
     pub method: String,
@@ -80,7 +83,7 @@ pub struct RpcImpl<Blockchain: RpcChain> {
     pub(super) start_time: Instant,
 }
 
-type Result<T> = std::result::Result<T, JsonRpcError>;
+type Result<T> = std::result::Result<T, RpcServerError>;
 
 impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     async fn add_node(&self, node: String, command: String, v2transport: bool) -> Result<Value> {
@@ -88,7 +91,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         let (ip, port) = if node.len() == 2 {
             (
                 node[0],
-                node[1].parse().map_err(|_| JsonRpcError::InvalidPort)?,
+                node[1].parse().map_err(|_| RpcServerError::InvalidPort)?,
             )
         } else {
             // TODO(@luisschwab): use `NetworkExt` to append the correct port
@@ -102,13 +105,13 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             }
         };
 
-        let peer = ip.parse().map_err(|_| JsonRpcError::InvalidAddress)?;
+        let peer = ip.parse().map_err(|_| RpcServerError::InvalidAddress)?;
 
         let _ = match command.as_str() {
             "add" => self.node.add_peer(peer, port, v2transport).await,
             "remove" => self.node.remove_peer(peer, port).await,
             "onetry" => self.node.onetry_peer(peer, port, v2transport).await,
-            _ => return Err(JsonRpcError::InvalidAddnodeCommand),
+            _ => return Err(RpcServerError::InvalidAddnodeCommand),
         };
 
         Ok(json!(null))
@@ -119,14 +122,14 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             let tx = self
                 .wallet
                 .get_transaction(&tx_id)
-                .ok_or(JsonRpcError::TxNotFound);
+                .ok_or(RpcServerError::TxNotFound);
             return tx.map(|tx| serde_json::to_value(self.make_raw_transaction(tx)).unwrap());
         }
 
         self.wallet
             .get_transaction(&tx_id)
             .and_then(|tx| serde_json::to_value(self.make_raw_transaction(tx)).ok())
-            .ok_or(JsonRpcError::TxNotFound)
+            .ok_or(RpcServerError::TxNotFound)
     }
 
     fn load_descriptor(&self, descriptor: String) -> Result<bool> {
@@ -151,7 +154,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         let addresses = self.wallet.get_cached_addresses();
         let wallet = self.wallet.clone();
         if self.block_filter_storage.is_none() {
-            return Err(JsonRpcError::InInitialBlockDownload);
+            return Err(RpcServerError::InInitialBlockDownload);
         };
 
         let cfilters = self.block_filter_storage.as_ref().unwrap().clone();
@@ -180,24 +183,24 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
         if stop_height != 0 && start_height >= stop_height {
             // When stop height is a non zero value it needs atleast to be greater than start_height.
-            return Err(JsonRpcError::InvalidRescanVal);
+            return Err(RpcServerError::InvalidRescanVal);
         }
 
         // if we are on ibd, we don't have any filters to rescan
         if self.chain.is_in_ibd() {
-            return Err(JsonRpcError::InInitialBlockDownload);
+            return Err(RpcServerError::InInitialBlockDownload);
         }
 
         let addresses = self.wallet.get_cached_addresses();
 
         if addresses.is_empty() {
-            return Err(JsonRpcError::NoAddressesToRescan);
+            return Err(RpcServerError::NoAddressesToRescan);
         }
 
         let wallet = self.wallet.clone();
 
         if self.block_filter_storage.is_none() {
-            return Err(JsonRpcError::NoBlockFilters);
+            return Err(RpcServerError::NoBlockFilters);
         };
 
         let cfilters = self.block_filter_storage.as_ref().unwrap().clone();
@@ -219,9 +222,11 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     }
 
     fn send_raw_transaction(&self, tx: String) -> Result<Txid> {
-        let tx_hex = Vec::from_hex(&tx).map_err(|_| JsonRpcError::InvalidHex)?;
-        let tx = deserialize(&tx_hex).map_err(|e| JsonRpcError::Decode(e.to_string()))?;
-        self.chain.broadcast(&tx).map_err(|_| JsonRpcError::Chain)?;
+        let tx_hex = Vec::from_hex(&tx).map_err(|_| RpcServerError::InvalidHex)?;
+        let tx = deserialize(&tx_hex).map_err(|e| RpcServerError::Decode(e.to_string()))?;
+        self.chain
+            .broadcast(&tx)
+            .map_err(|_| RpcServerError::Chain)?;
 
         Ok(tx.compute_txid())
     }
@@ -230,15 +235,15 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         self.node
             .get_peer_info()
             .await
-            .map_err(|_| JsonRpcError::Node("Failed to get peer info".to_string()))
+            .map_err(|_| RpcServerError::Node("Failed to get peer info".to_string()))
     }
 }
 
 async fn handle_json_rpc_request(
-    req: RpcRequest,
+    req: JsonRequest,
     state: Arc<RpcImpl<impl RpcChain>>,
 ) -> Result<serde_json::Value> {
-    let RpcRequest {
+    let JsonRequest {
         jsonrpc,
         method,
         params,
@@ -247,7 +252,7 @@ async fn handle_json_rpc_request(
 
     if let Some(version) = jsonrpc {
         if !["1.0", "2.0"].contains(&version.as_str()) {
-            return Err(JsonRpcError::InvalidRequest);
+            return Err(RpcServerError::InvalidRequest);
         }
     }
 
@@ -285,7 +290,7 @@ async fn handle_json_rpc_request(
                     Ok(serde_json::to_value(block).unwrap())
                 }
 
-                _ => Err(JsonRpcError::InvalidVerbosityLevel),
+                _ => Err(RpcServerError::InvalidVerbosityLevel),
             }
         }
 
@@ -359,7 +364,7 @@ async fn handle_json_rpc_request(
             let txid = get_hash(&params, 0, "txid")?;
             let vout = get_numeric(&params, 1, "vout")?;
             let script = get_string(&params, 2, "script")?;
-            let script = ScriptBuf::from_hex(&script).map_err(|_| JsonRpcError::InvalidScript)?;
+            let script = ScriptBuf::from_hex(&script).map_err(|_| RpcServerError::InvalidScript)?;
             let height = get_numeric(&params, 3, "height")?;
 
             let state = state.clone();
@@ -436,7 +441,7 @@ async fn handle_json_rpc_request(
                 "medium" => RescanConfidence::Medium,
                 "high" => RescanConfidence::High,
                 "exact" => RescanConfidence::Exact,
-                _ => return Err(JsonRpcError::InvalidRescanVal),
+                _ => return Err(RpcServerError::InvalidRescanVal),
             };
 
             state
@@ -456,84 +461,82 @@ async fn handle_json_rpc_request(
             .map(|v| serde_json::to_value(v).unwrap()),
 
         _ => {
-            let error = JsonRpcError::MethodNotFound;
+            let error = RpcServerError::MethodNotFound;
             Err(error)
         }
     }
 }
 
-fn get_http_error_code(err: &JsonRpcError) -> u16 {
+fn get_http_error_code(err: &RpcServerError) -> u16 {
     match err {
         // you messed up
-        JsonRpcError::InvalidHex
-        | JsonRpcError::InvalidAddress
-        | JsonRpcError::InvalidScript
-        | JsonRpcError::InvalidRequest
-        | JsonRpcError::InvalidPort
-        | JsonRpcError::InvalidDescriptor(_)
-        | JsonRpcError::InvalidVerbosityLevel
-        | JsonRpcError::Decode(_)
-        | JsonRpcError::NoBlockFilters
-        | JsonRpcError::InvalidMemInfoMode
-        | JsonRpcError::InvalidAddnodeCommand
-        | JsonRpcError::InvalidTimestamp
-        | JsonRpcError::InvalidRescanVal
-        | JsonRpcError::NoAddressesToRescan
-        | JsonRpcError::InvalidParameterType(_)
-        | JsonRpcError::MissingParameter(_)
-        | JsonRpcError::ChainWorkOverflow
-        | JsonRpcError::Wallet(_) => 400,
+        RpcServerError::InvalidHex
+        | RpcServerError::InvalidAddress
+        | RpcServerError::InvalidScript
+        | RpcServerError::InvalidRequest
+        | RpcServerError::InvalidPort
+        | RpcServerError::InvalidDescriptor(_)
+        | RpcServerError::InvalidVerbosityLevel
+        | RpcServerError::Decode(_)
+        | RpcServerError::NoBlockFilters
+        | RpcServerError::InvalidMemInfoMode
+        | RpcServerError::InvalidAddnodeCommand
+        | RpcServerError::InvalidTimestamp
+        | RpcServerError::InvalidRescanVal
+        | RpcServerError::NoAddressesToRescan
+        | RpcServerError::ChainWorkOverflow
+        | RpcServerError::Parse(_)
+        | RpcServerError::Wallet(_) => 400,
 
         // idunnolol
-        JsonRpcError::MethodNotFound | JsonRpcError::BlockNotFound | JsonRpcError::TxNotFound => {
-            404
-        }
+        RpcServerError::MethodNotFound
+        | RpcServerError::BlockNotFound
+        | RpcServerError::TxNotFound => 404,
 
         // we messed up, sowwy
-        JsonRpcError::InInitialBlockDownload
-        | JsonRpcError::Node(_)
-        | JsonRpcError::Chain
-        | JsonRpcError::Filters(_) => 503,
+        RpcServerError::InInitialBlockDownload
+        | RpcServerError::Node(_)
+        | RpcServerError::Chain
+        | RpcServerError::Filters(_) => 503,
     }
 }
 
-fn get_json_rpc_error_code(err: &JsonRpcError) -> i32 {
+fn get_json_rpc_error_code(err: &RpcServerError) -> i32 {
     match err {
         // Parse Error
-        JsonRpcError::Decode(_) | JsonRpcError::InvalidParameterType(_) => -32700,
+        RpcServerError::Decode(_) | RpcServerError::Parse(_) => -32700,
 
         // Invalid Request
-        JsonRpcError::InvalidHex
-        | JsonRpcError::MissingParameter(_)
-        | JsonRpcError::InvalidAddress
-        | JsonRpcError::InvalidScript
-        | JsonRpcError::MethodNotFound
-        | JsonRpcError::InvalidRequest
-        | JsonRpcError::InvalidPort
-        | JsonRpcError::InvalidDescriptor(_)
-        | JsonRpcError::InvalidVerbosityLevel
-        | JsonRpcError::TxNotFound
-        | JsonRpcError::BlockNotFound
-        | JsonRpcError::InvalidTimestamp
-        | JsonRpcError::InvalidMemInfoMode
-        | JsonRpcError::InvalidAddnodeCommand
-        | JsonRpcError::InvalidRescanVal
-        | JsonRpcError::NoAddressesToRescan
-        | JsonRpcError::ChainWorkOverflow
-        | JsonRpcError::Wallet(_) => -32600,
+        RpcServerError::InvalidHex
+        | RpcServerError::InvalidAddress
+        | RpcServerError::InvalidScript
+        | RpcServerError::MethodNotFound
+        | RpcServerError::InvalidRequest
+        | RpcServerError::InvalidPort
+        | RpcServerError::InvalidDescriptor(_)
+        | RpcServerError::InvalidVerbosityLevel
+        | RpcServerError::TxNotFound
+        | RpcServerError::BlockNotFound
+        | RpcServerError::InvalidTimestamp
+        | RpcServerError::InvalidMemInfoMode
+        | RpcServerError::InvalidAddnodeCommand
+        | RpcServerError::InvalidRescanVal
+        | RpcServerError::NoAddressesToRescan
+        | RpcServerError::ChainWorkOverflow
+        | RpcServerError::Wallet(_) => -32600,
 
         // server error
-        JsonRpcError::InInitialBlockDownload
-        | JsonRpcError::Node(_)
-        | JsonRpcError::Chain
-        | JsonRpcError::NoBlockFilters
-        | JsonRpcError::Filters(_) => -32603,
+        RpcServerError::InInitialBlockDownload
+        | RpcServerError::Node(_)
+        | RpcServerError::Chain
+        | RpcServerError::NoBlockFilters
+        | RpcServerError::Filters(_) => -32603,
     }
 }
 
 async fn json_rpc_request(
     State(state): State<Arc<RpcImpl<impl RpcChain>>>,
-    Json(req): Json<RpcRequest>,
+    Json(req): Json<JsonRequest>,
 ) -> axum::http::Response<axum::body::Body> {
     debug!("Received JSON-RPC request: {req:?}");
 
@@ -675,7 +678,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         }
     }
 
-    fn make_raw_transaction(&self, tx: CachedTransaction) -> RawTxJson {
+    fn make_raw_transaction(&self, tx: CachedTransaction) -> RawTx {
         let raw_tx = tx.tx;
         let in_active_chain = tx.height != 0;
         let hex = serialize_hex(&raw_tx);
@@ -691,7 +694,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             0
         };
 
-        RawTxJson {
+        RawTx {
             in_active_chain,
             hex,
             txid,
@@ -794,5 +797,144 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         axum::serve(listener, router)
             .await
             .expect("failed to start rpc server");
+    }
+}
+
+#[derive(Debug)]
+pub enum RpcServerError {
+    /// There was a rescan request but we do not have any addresses in the watch-only wallet.
+    NoAddressesToRescan,
+
+    /// There was a rescan request with invalid values
+    InvalidRescanVal,
+
+    /// Verbosity level is not 0 or 1
+    InvalidVerbosityLevel,
+
+    /// The requested transaction is not found in the blockchain
+    TxNotFound,
+
+    /// The provided script is invalid, e.g., if it is not a valid P2PKH or P2SH script
+    InvalidScript,
+
+    /// The provided descriptor is invalid, e.g., if it does not match the expected format
+    InvalidDescriptor(miniscript::Error),
+
+    /// The requested block is not found in the blockchain
+    BlockNotFound,
+
+    /// There is an error with the chain, e.g., if the chain is not synced or when the chain is not valid
+    Chain,
+
+    /// The request is invalid, e.g., some parameters use an incorrect type
+    InvalidRequest,
+
+    /// The requested method is not found, e.g., if the method is not implemented or when the method is not available
+    MethodNotFound,
+
+    /// This error is returned when there is an error decoding the request, e.g., if the request is not valid JSON
+    Decode(String),
+
+    /// The provided port is invalid, e.g., when it is not a valid port number (0-65535)
+    InvalidPort,
+
+    /// The provided address is invalid, e.g., when it is not a valid IP address or hostname
+    InvalidAddress,
+
+    /// This error is returned when there is an error with the node, e.g., if the node is not connected or when the node is not responding
+    Node(String),
+
+    /// This error is returned when the node does not have block filters enabled, which is required for some RPC calls
+    NoBlockFilters,
+
+    /// This error is returned when a hex value is invalid
+    InvalidHex,
+
+    /// This error is returned when the node is in initial block download, which means it is still syncing the blockchain
+    InInitialBlockDownload,
+
+    InvalidMemInfoMode,
+
+    /// This error is returned when there is an error with the wallet, e.g., if the wallet is not loaded or when the wallet is not available
+    Wallet(String),
+
+    /// This error is returned when there is an error with block filters, e.g., if the filters are not available or when there is an issue with the filter data
+    Filters(String),
+
+    /// This error is returned when there is an error calculating the chain work
+    ChainWorkOverflow,
+
+    /// This error is returned when the addnode command is invalid, e.g., if the command is not recognized or when the parameters are incorrect
+    InvalidAddnodeCommand,
+
+    /// Raised if when the rescanblockchain command, with the timestamp flag activated, contains some timestamp thats less than the genesis one and not zero which is the default value for this arg.
+    InvalidTimestamp,
+
+    Parse(ArgParseError),
+}
+
+impl Display for RpcServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcServerError::InvalidTimestamp => write!(f, "Invalid timestamp, ensure that it is between the genesis and the tip."),
+            RpcServerError::InvalidRescanVal => write!(f, "Your rescan request contains invalid values"),
+            RpcServerError::NoAddressesToRescan => write!(f, "You do not have any address to proceed with the rescan"),
+            RpcServerError::InvalidRequest => write!(f, "Invalid request"),
+            RpcServerError::InvalidHex =>  write!(f, "Invalid hex"),
+            RpcServerError::MethodNotFound =>  write!(f, "Method not found"),
+            RpcServerError::Decode(e) =>  write!(f, "error decoding request: {e}"),
+            RpcServerError::TxNotFound =>  write!(f, "Transaction not found"),
+            RpcServerError::InvalidDescriptor(e) =>  write!(f, "Invalid descriptor: {e}"),
+            RpcServerError::BlockNotFound =>  write!(f, "Block not found"),
+            RpcServerError::Chain => write!(f, "Chain error"),
+            RpcServerError::InvalidPort => write!(f, "Invalid port"),
+            RpcServerError::InvalidAddress => write!(f, "Invalid address"),
+            RpcServerError::Node(e) => write!(f, "Node error: {e}"),
+            RpcServerError::NoBlockFilters => write!(f, "You don't have block filters enabled, please start florestad without --no-cfilters to run this RPC"),
+            RpcServerError::InInitialBlockDownload => write!(f, "Node is in initial block download, wait until it's finished"),
+            RpcServerError::InvalidScript => write!(f, "Invalid script"),
+            RpcServerError::InvalidVerbosityLevel => write!(f, "Invalid verbosity level"),
+            RpcServerError::InvalidMemInfoMode => write!(f, "Invalid meminfo mode, should be stats or mallocinfo"),
+            RpcServerError::Wallet(e) => write!(f, "Wallet error: {e}"),
+            RpcServerError::Filters(e) => write!(f, "Error with filters: {e}"),
+            RpcServerError::ChainWorkOverflow => write!(f, "Overflow while calculating the chain work"),
+            RpcServerError::InvalidAddnodeCommand => write!(f, "Invalid addnode command"),
+            RpcServerError::Parse(e) => write!(f, "{e:?}")
+        }
+    }
+}
+
+impl IntoResponse for RpcServerError {
+    fn into_response(self) -> axum::http::Response<axum::body::Body> {
+        let body = serde_json::json!({
+            "error": self.to_string(),
+            "result": serde_json::Value::Null,
+            "id": serde_json::Value::Null,
+        });
+        axum::http::Response::builder()
+            .status(axum::http::StatusCode::BAD_REQUEST)
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+}
+
+impl From<HeaderExtError> for RpcServerError {
+    fn from(value: HeaderExtError) -> Self {
+        match value {
+            HeaderExtError::Chain(_) => RpcServerError::Chain,
+            HeaderExtError::BlockNotFound => RpcServerError::BlockNotFound,
+            HeaderExtError::ChainWorkOverflow => RpcServerError::ChainWorkOverflow,
+        }
+    }
+}
+
+impl_error_from!(RpcServerError, miniscript::Error, InvalidDescriptor);
+
+impl_error_from!(RpcServerError, ArgParseError, Parse);
+
+impl<T: std::fmt::Debug> From<floresta_watch_only::WatchOnlyError<T>> for RpcServerError {
+    fn from(e: floresta_watch_only::WatchOnlyError<T>) -> Self {
+        RpcServerError::Wallet(e.to_string())
     }
 }

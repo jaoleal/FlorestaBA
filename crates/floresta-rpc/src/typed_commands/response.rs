@@ -75,11 +75,11 @@ pub struct RawTx {
     /// A list of inputs being spent by this transaction
     ///
     /// See [TxIn] for more information about the contents of this
-    pub vin: Vec<TxIn>,
+    pub vin: Vec<TxInJson>,
     /// A list of outputs being created by this tx
     ///
     /// Se [TxOut] for more information
-    pub vout: Vec<TxOut>,
+    pub vout: Vec<TxOutJson>,
     /// The hash of the block that included this tx, if any
     pub blockhash: String,
     /// How many blocks have been mined after this transaction's confirmation
@@ -93,18 +93,18 @@ pub struct RawTx {
 
 /// A transaction output returned by some RPCs like gettransaction and getblock
 #[derive(Deserialize, Serialize)]
-pub struct TxOut {
+pub struct TxOutJson {
     /// The amount in sats locked in this UTXO
     pub value: u64,
     /// This utxo's index inside the transaction
     pub n: u32,
     /// The locking script of this utxo
-    pub script_pub_key: ScriptPubKey,
+    pub script_pub_key: ScriptPubKeyJson,
 }
 
 /// The locking script inside a txout
 #[derive(Deserialize, Serialize)]
-pub struct ScriptPubKey {
+pub struct ScriptPubKeyJson {
     /// A ASM representation for this script
     ///
     /// Assembly is a high-level representation of a lower level code. Instructions
@@ -126,7 +126,7 @@ pub struct ScriptPubKey {
 
 /// A transaction input returned by some rpcs, like gettransaction and getblock
 #[derive(Deserialize, Serialize)]
-pub struct TxIn {
+pub struct TxInJson {
     /// The txid that created this UTXO
     pub txid: String,
     /// The index of this UTXO inside the tx that created it
@@ -277,85 +277,6 @@ pub struct GetBlockResVerbose {
     pub target: String,
 }
 
-/// A confidence enum to auxiliate rescan timestamp values.
-///
-/// Tells how much confidence you need for this rescan request. That is, the how conservative you want floresta to be when determining which block to start the rescan.
-/// will make the rescan to start in a block that have an lower timestamp than the given in order to be more certain
-/// about finding addresses and relevant transactions, a lower confidence will make the rescan to be closer to the given value.
-///
-/// This input is necessary to cover network variancy specially in testnet, for mainnet you can safely use low or medium confidences
-/// depending on how much sure you are about the given timestamp covering the addresses you need.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[serde(rename_all = "lowercase")]
-pub enum RescanConfidence {
-    /// `high`: 99% confidence interval. Meaning 46 minutes in seconds.
-    High,
-
-    /// `medium` (default): 95% confidence interval. Meaning 30 minutes in seconds.
-    Medium,
-
-    /// `low`: 90% confidence interval. Meaning 23 minutes in seconds.
-    Low,
-
-    /// `exact`: Removes any lookback addition. Meaning 0 in seconds.
-    Exact,
-}
-
-#[derive(Debug)]
-/// All possible errors returned by the jsonrpc
-pub enum Error {
-    /// An error while deserializing our response
-    Serde(serde_json::Error),
-
-    #[cfg(feature = "with-jsonrpc")]
-    /// An internal reqwest error
-    JsonRpc(jsonrpc::Error),
-
-    /// An error internal to our jsonrpc server
-    Api(serde_json::Value),
-
-    /// The server sent an empty response
-    EmptyResponse,
-
-    /// The provided verbosity level is invalid
-    InvalidVerbosity,
-
-    /// The user requested a rescan based on invalid values.
-    InvalidRescanVal,
-
-    /// The requested transaction output was not found
-    TxOutNotFound,
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(value: serde_json::Error) -> Self {
-        Error::Serde(value)
-    }
-}
-
-#[cfg(feature = "with-jsonrpc")]
-impl From<jsonrpc::Error> for Error {
-    fn from(value: jsonrpc::Error) -> Self {
-        Error::JsonRpc(value)
-    }
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            #[cfg(feature = "with-jsonrpc")]
-            Error::JsonRpc(e) => write!(f, "JsonRpc returned an error {e}"),
-            Error::Api(e) => write!(f, "general jsonrpc error: {e}"),
-            Error::Serde(e) => write!(f, "error while deserializing the response: {e}"),
-            Error::EmptyResponse => write!(f, "got an empty response from server"),
-            Error::InvalidVerbosity => write!(f, "invalid verbosity level"),
-            Error::InvalidRescanVal => write!(f, "Invalid rescan values"),
-            Error::TxOutNotFound => write!(f, "Transaction output was not found"),
-        }
-    }
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GetMemInfoStats {
     pub locked: MemInfoLocked,
@@ -427,5 +348,3 @@ impl Display for AddNodeCommand {
         write!(f, "{cmd}")
     }
 }
-
-impl std::error::Error for Error {}

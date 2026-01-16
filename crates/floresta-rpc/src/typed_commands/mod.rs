@@ -1,11 +1,20 @@
-//! This module defines the structure for JSON-RPC requests and provides utility functions to
-//! extract parameters from the request.
+//! We deal with RPCs in a manner that allow us to be flexible with it, naturally in rust, everything is a type
+//! and thats not different for RPCs Requests and Results schema. We translate command schemas into rust native types
+//! and we only translate them to another notation language like json when transporting, excluding IPC.
+//!
+//! The purpose of this module is to offer rpc types and handling for them in such a manner that they dont affect
+//! how one should send, receive and transport them.
 
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub mod request;
+pub mod response;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 /// Represents a JSON-RPC 2.0 request.
-pub struct RpcRequest {
+pub struct JsonRequest {
     /// The JSON-RPC version, typically "2.0".
     ///
     /// For JSON-RPC 2.0, this field is required. For earlier versions, it may be omitted.
@@ -23,6 +32,13 @@ pub struct RpcRequest {
     pub id: Value,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RpcError {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<String>,
+}
+
 /// Some utility functions to extract parameters from the request. These
 /// methods already handle the case where the parameter is missing or has an
 /// unexpected type, returning an error if so.
@@ -31,7 +47,7 @@ pub mod arg_parser {
 
     use serde_json::Value;
 
-    use crate::json_rpc::res::JsonRpcError;
+    use crate::typed_commands::ArgParseError;
 
     /// Extracts a u64 parameter from the request parameters at the specified index.
     ///
@@ -41,17 +57,17 @@ pub mod arg_parser {
         params: &[Value],
         index: usize,
         opt_name: &str,
-    ) -> Result<T, JsonRpcError> {
+    ) -> Result<T, ArgParseError> {
         let v = params
             .get(index)
-            .ok_or_else(|| JsonRpcError::MissingParameter(opt_name.to_string()))?;
+            .ok_or_else(|| ArgParseError::MissingParameter(opt_name.to_string()))?;
 
         let n = v.as_u64().ok_or_else(|| {
-            JsonRpcError::InvalidParameterType(format!("{opt_name} must be a number"))
+            ArgParseError::InvalidParameterType(format!("{opt_name} must be a number"))
         })?;
 
         T::try_from(n)
-            .map_err(|_| JsonRpcError::InvalidParameterType(format!("{opt_name} is out-of-range")))
+            .map_err(|_| ArgParseError::InvalidParameterType(format!("{opt_name} is out-of-range")))
     }
 
     /// Extracts a string parameter from the request parameters at the specified index.
@@ -62,13 +78,13 @@ pub mod arg_parser {
         params: &[Value],
         index: usize,
         opt_name: &str,
-    ) -> Result<String, JsonRpcError> {
+    ) -> Result<String, ArgParseError> {
         let v = params
             .get(index)
-            .ok_or_else(|| JsonRpcError::MissingParameter(opt_name.to_string()))?;
+            .ok_or_else(|| ArgParseError::MissingParameter(opt_name.to_string()))?;
 
         let str = v.as_str().ok_or_else(|| {
-            JsonRpcError::InvalidParameterType(format!("{opt_name} must be a string"))
+            ArgParseError::InvalidParameterType(format!("{opt_name} must be a string"))
         })?;
 
         Ok(str.to_string())
@@ -78,13 +94,13 @@ pub mod arg_parser {
     ///
     /// This function checks if the parameter exists and is of type boolean. Returns an error
     /// otherwise.
-    pub fn get_bool(params: &[Value], index: usize, opt_name: &str) -> Result<bool, JsonRpcError> {
+    pub fn get_bool(params: &[Value], index: usize, opt_name: &str) -> Result<bool, ArgParseError> {
         let v = params
             .get(index)
-            .ok_or_else(|| JsonRpcError::MissingParameter(opt_name.to_string()))?;
+            .ok_or_else(|| ArgParseError::MissingParameter(opt_name.to_string()))?;
 
         v.as_bool().ok_or_else(|| {
-            JsonRpcError::InvalidParameterType(format!("{opt_name} must be a boolean"))
+            ArgParseError::InvalidParameterType(format!("{opt_name} must be a boolean"))
         })
     }
 
@@ -97,13 +113,13 @@ pub mod arg_parser {
         params: &[Value],
         index: usize,
         opt_name: &str,
-    ) -> Result<T, JsonRpcError> {
+    ) -> Result<T, ArgParseError> {
         let v = params
             .get(index)
-            .ok_or_else(|| JsonRpcError::MissingParameter(opt_name.to_string()))?;
+            .ok_or_else(|| ArgParseError::MissingParameter(opt_name.to_string()))?;
 
         v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
-            JsonRpcError::InvalidParameterType(format!("{opt_name} must be a valid hash"))
+            ArgParseError::InvalidParameterType(format!("{opt_name} must be a valid hash"))
         })
     }
 
@@ -116,20 +132,20 @@ pub mod arg_parser {
         params: &[Value],
         index: usize,
         opt_name: &str,
-    ) -> Result<Vec<T>, JsonRpcError> {
+    ) -> Result<Vec<T>, ArgParseError> {
         let v = params
             .get(index)
-            .ok_or_else(|| JsonRpcError::MissingParameter(opt_name.to_string()))?;
+            .ok_or_else(|| ArgParseError::MissingParameter(opt_name.to_string()))?;
 
         let array = v.as_array().ok_or_else(|| {
-            JsonRpcError::InvalidParameterType(format!("{opt_name} must be an array of hashes"))
+            ArgParseError::InvalidParameterType(format!("{opt_name} must be an array of hashes"))
         })?;
 
         array
             .iter()
             .map(|v| {
                 v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
-                    JsonRpcError::InvalidParameterType(format!("{opt_name} must be a valid hash"))
+                    ArgParseError::InvalidParameterType(format!("{opt_name} must be a valid hash"))
                 })
             })
             .collect()
@@ -144,8 +160,8 @@ pub mod arg_parser {
         params: &[Value],
         index: usize,
         opt_name: &str,
-        extractor_fn: impl Fn(&[Value], usize, &str) -> Result<T, JsonRpcError>,
-    ) -> Result<Option<T>, JsonRpcError> {
+        extractor_fn: impl Fn(&[Value], usize, &str) -> Result<T, ArgParseError>,
+    ) -> Result<Option<T>, ArgParseError> {
         if params.len() <= index {
             return Ok(None);
         }
@@ -153,4 +169,10 @@ pub mod arg_parser {
         let value = extractor_fn(params, index, opt_name)?;
         Ok(Some(value))
     }
+}
+
+#[derive(Debug)]
+pub enum ArgParseError {
+    MissingParameter(String),
+    InvalidParameterType(String),
 }

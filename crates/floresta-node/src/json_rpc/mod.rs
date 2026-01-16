@@ -1,5 +1,3 @@
-pub mod request;
-pub mod res;
 pub mod server;
 
 // endpoint impls

@@ -10,11 +10,69 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+use std::fmt::Display;
+
 #[cfg(feature = "with-jsonrpc")]
 pub mod jsonrpc_client;
 
 pub mod rpc;
-pub mod rpc_types;
+pub mod typed_commands;
+
+#[derive(Debug)]
+/// All possible errors returned by floresta-rpc
+pub enum Error {
+    /// An error while deserializing our response
+    Serde(serde_json::Error),
+
+    #[cfg(feature = "with-jsonrpc")]
+    /// An internal reqwest error
+    JsonRpc(jsonrpc::Error),
+
+    /// An error internal to our jsonrpc server
+    Api(serde_json::Value),
+
+    /// The server sent an empty response
+    EmptyResponse,
+
+    /// The provided verbosity level is invalid
+    InvalidVerbosity,
+
+    /// The user requested a rescan based on invalid values.
+    InvalidRescanVal,
+
+    /// The requested transaction output was not found
+    TxOutNotFound,
+}
+
+impl std::error::Error for Error {}
+
+impl From<serde_json::Error> for Error {
+    fn from(value: serde_json::Error) -> Self {
+        Error::Serde(value)
+    }
+}
+
+#[cfg(feature = "with-jsonrpc")]
+impl From<jsonrpc::Error> for Error {
+    fn from(value: jsonrpc::Error) -> Self {
+        Error::JsonRpc(value)
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "with-jsonrpc")]
+            Error::JsonRpc(e) => write!(f, "JsonRpc returned an error {e}"),
+            Error::Api(e) => write!(f, "general jsonrpc error: {e}"),
+            Error::Serde(e) => write!(f, "error while deserializing the response: {e}"),
+            Error::EmptyResponse => write!(f, "got an empty response from server"),
+            Error::InvalidVerbosity => write!(f, "invalid verbosity level"),
+            Error::InvalidRescanVal => write!(f, "Invalid rescan values"),
+            Error::TxOutNotFound => write!(f, "Transaction output was not found"),
+        }
+    }
+}
 
 // Those tests doesn't work on windowns
 // TODO (Davidson): work on windows?
@@ -38,7 +96,7 @@ mod tests {
 
     use crate::jsonrpc_client::Client;
     use crate::rpc::FlorestaRPC;
-    use crate::rpc_types::GetBlockRes;
+    use crate::typed_commands::response::GetBlockRes;
 
     struct Florestad {
         proc: Child,
