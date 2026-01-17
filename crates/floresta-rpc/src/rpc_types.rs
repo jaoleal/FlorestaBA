@@ -181,7 +181,7 @@ pub struct PeerInfo {
     pub transport_protocol: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub enum GetBlockRes {
     Zero(String),
     One(Box<GetBlockVerboseOne>),
