@@ -1,7 +1,4 @@
 use corepc_types::v30::GetBlockVerboseOne;
-use floresta_chain::extensions::HeaderExtError;
-use floresta_common::impl_error_from;
-use floresta_mempool::mempool::AcceptToMempoolError;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -14,6 +11,7 @@ pub mod jsonrpc_interface {
     use axum::response::IntoResponse;
     use floresta_chain::extensions::HeaderExtError;
     use floresta_common::impl_error_from;
+    use floresta_mempool::mempool::AcceptToMempoolError;
     use serde::Deserialize;
     use serde::Serialize;
     use serde_json::Value;
@@ -189,8 +187,11 @@ pub mod jsonrpc_interface {
 
         /// Raised if when the rescanblockchain command, with the timestamp flag activated, contains some timestamp thats less than the genesis one and not zero which is the default value for this arg.
         InvalidTimestamp,
+        /// Something went wrong when attempting to publish a transaction to mempool
+        MempoolAccept(AcceptToMempoolError),
     }
 
+    impl_error_from!(JsonRpcError, AcceptToMempoolError, MempoolAccept);
     impl JsonRpcError {
         pub fn http_code(&self) -> u16 {
             use axum::http::StatusCode;
@@ -204,6 +205,7 @@ pub mod jsonrpc_interface {
                 | JsonRpcError::InvalidDescriptor(_)
                 | JsonRpcError::InvalidVerbosityLevel
                 | JsonRpcError::Decode(_)
+                | JsonRpcError::MempoolAccept(_)
                 | JsonRpcError::InvalidMemInfoMode
                 | JsonRpcError::InvalidAddnodeCommand
                 | JsonRpcError::InvalidDisconnectNodeCommand
@@ -349,6 +351,11 @@ pub mod jsonrpc_interface {
                     code: SERVER_ERROR_MAX - 4, // -32095
                     message: "Wallet error".into(),
                     data: Some(Value::String(msg.clone())),
+                },
+                JsonRpcError::MempoolAccept(msg) => RpcError {
+                    code: SERVER_ERROR_MAX - 5, // -32095
+                    message: "Wallet error".into(),
+                    data: Some(Value::String(msg.to_string())),
                 },
                 JsonRpcError::InInitialBlockDownload => RpcError {
                     code: SERVER_ERROR_MAX - 5, // -32094
