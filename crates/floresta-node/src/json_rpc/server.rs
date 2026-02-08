@@ -44,7 +44,6 @@ use tracing::error;
 use tracing::info;
 
 use super::res::jsonrpc_interface::JsonRpcError;
-use super::res::GetBlockRes;
 use super::res::RawTxJson;
 use super::res::ScriptPubKeyJson;
 use super::res::ScriptSigJson;
@@ -273,7 +272,10 @@ async fn handle_json_rpc_request(
     }
 
     // Methods that require params
-    let params = params.ok_or(JsonRpcError::MissingParameter("params".into()))?;
+    //
+    // We default here because theres some cases we have only optionals for a call, so even if omitted, is
+    // nice for params to be Some(Value) even if this value is Null.
+    let params = params.unwrap_or_default();
 
     match method.as_str() {
         "getblock" => {
