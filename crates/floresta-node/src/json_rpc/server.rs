@@ -384,6 +384,28 @@ async fn handle_json_rpc_request(
             Ok(serde_json::json!(null))
         }
 
+        "setban" => {
+            let ip = get_string(&params, 0, "ip")?;
+            let command = get_string(&params, 1, "command")?;
+            let bantime = get_optional_field(&params, 2, "bantime", get_numeric)?;
+            let absolute = get_optional_field(&params, 3, "absolute", get_bool)?;
+
+            state
+                .set_ban(ip, command, bantime, absolute)
+                .await
+                .map(|v| serde_json::to_value(v).unwrap())
+        }
+
+        "listbans" => state
+            .list_bans()
+            .await
+            .map(|v| serde_json::to_value(v).unwrap()),
+
+        "clearbans" => state
+            .clear_bans()
+            .await
+            .map(|v| serde_json::to_value(v).unwrap()),
+
         // wallet
         "loaddescriptor" => {
             let descriptor = get_string(&params, 0, "descriptor")?;
@@ -447,6 +469,7 @@ fn get_http_error_code(err: &JsonRpcError) -> u16 {
         | JsonRpcError::InvalidMemInfoMode
         | JsonRpcError::InvalidAddnodeCommand
         | JsonRpcError::InvalidDisconnectNodeCommand
+        | JsonRpcError::InvalidSetBanCommand
         | JsonRpcError::PeerNotFound
         | JsonRpcError::InvalidTimestamp
         | JsonRpcError::InvalidRescanVal
@@ -490,6 +513,7 @@ fn get_json_rpc_error_code(err: &JsonRpcError) -> i32 {
         | JsonRpcError::InvalidMemInfoMode
         | JsonRpcError::InvalidAddnodeCommand
         | JsonRpcError::InvalidDisconnectNodeCommand
+        | JsonRpcError::InvalidSetBanCommand
         | JsonRpcError::PeerNotFound
         | JsonRpcError::InvalidRescanVal
         | JsonRpcError::NoAddressesToRescan

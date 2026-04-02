@@ -6,6 +6,7 @@ use core::net::IpAddr;
 use core::net::SocketAddr;
 
 use bitcoin::Network;
+use floresta_wire::node_interface::BanEntry;
 use floresta_wire::node_interface::PeerInfo;
 use serde_json::json;
 use serde_json::Value;
@@ -117,5 +118,68 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             .get_peer_info()
             .await
             .map_err(|_| JsonRpcError::Node("Failed to get peer information".to_string()))
+    }
+
+    /// Adds or removes an IP address from the ban list.
+    ///
+    /// - `command`: `"add"` to ban, `"remove"` to unban.
+    /// - `bantime`: seconds to ban (0 or absent = 24 h default). Ignored for `"remove"`.
+    /// - `absolute`: if `true`, `bantime` is an absolute Unix timestamp instead of a duration.
+    pub(crate) async fn set_ban(
+        &self,
+        ip: String,
+        command: String,
+        bantime: Option<u64>,
+        absolute: Option<bool>,
+    ) -> Result<Value> {
+        let addr = ip
+            .parse::<IpAddr>()
+            .map_err(|_| JsonRpcError::InvalidAddress)?;
+
+        match command.as_str() {
+            "add" => {
+                let duration = if absolute.unwrap_or(false) {
+                    // bantime is an absolute Unix timestamp; convert to duration from now.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    bantime.unwrap_or(0).saturating_sub(now)
+                } else {
+                    bantime.unwrap_or(0)
+                };
+                self.node
+                    .set_ban(addr, duration)
+                    .await
+                    .map_err(|e| JsonRpcError::Node(e.to_string()))?;
+            }
+            "remove" => {
+                self.node
+                    .unset_ban(addr)
+                    .await
+                    .map_err(|e| JsonRpcError::Node(e.to_string()))?;
+            }
+            _ => return Err(JsonRpcError::InvalidSetBanCommand),
+        }
+
+        Ok(json!(null))
+    }
+
+    /// Returns all currently active bans.
+    pub(crate) async fn list_bans(&self) -> Result<Vec<BanEntry>> {
+        self.node
+            .list_bans()
+            .await
+            .map_err(|e| JsonRpcError::Node(e.to_string()))
+    }
+
+    /// Clears all active bans.
+    pub(crate) async fn clear_bans(&self) -> Result<Value> {
+        self.node
+            .clear_bans()
+            .await
+            .map_err(|e| JsonRpcError::Node(e.to_string()))?;
+
+        Ok(json!(null))
     }
 }

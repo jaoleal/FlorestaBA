@@ -327,3 +327,31 @@ class BaseRPC(ABC):
                 "disconnectnode", params=[node_address, node_id]
             )
         return self.perform_request("disconnectnode", params=[node_address])
+
+    def setban(
+        self,
+        ip: str,
+        command: str,
+        bantime: int = 0,
+        absolute: bool = False,
+    ):
+        """
+        Add or remove an IP address from the ban list.
+
+        `command` must be `"add"` or `"remove"`.
+        `bantime` is the ban duration in seconds (0 = default 24 h).
+        If `absolute` is True, `bantime` is treated as an absolute Unix timestamp.
+        """
+        return self.perform_request("setban", [ip, command, bantime, absolute])
+
+    def listbans(self) -> list:
+        """
+        Return all currently active bans.
+        """
+        return self.perform_request("listbans")
+
+    def clearbans(self):
+        """
+        Remove all active bans.
+        """
+        return self.perform_request("clearbans")

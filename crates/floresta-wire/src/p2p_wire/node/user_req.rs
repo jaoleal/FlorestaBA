@@ -154,6 +154,32 @@ where
                 return;
             }
 
+            UserRequest::SetBan(ip, duration) => {
+                self.common.ban_man.add_ban(ip, duration);
+                // Disconnect the peer if it is currently connected.
+                self.handle_ban_connected_peer(ip);
+                try_and_log!(responder.send(NodeResponse::SetBan(true)));
+                return;
+            }
+
+            UserRequest::UnsetBan(ip) => {
+                let removed = self.common.ban_man.remove_ban(ip);
+                try_and_log!(responder.send(NodeResponse::UnsetBan(removed)));
+                return;
+            }
+
+            UserRequest::ClearBans => {
+                self.common.ban_man.clear_bans();
+                try_and_log!(responder.send(NodeResponse::ClearBans(true)));
+                return;
+            }
+
+            UserRequest::ListBans => {
+                let bans = self.handle_list_bans();
+                try_and_log!(responder.send(NodeResponse::ListBans(bans)));
+                return;
+            }
+
             UserRequest::SendTransaction(transaction) => {
                 let txid = transaction.compute_txid();
                 let mut mempool = self.mempool.lock().await;

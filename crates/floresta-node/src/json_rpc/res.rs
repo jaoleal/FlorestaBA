@@ -225,6 +225,9 @@ pub enum JsonRpcError {
 
     /// Something went wrong when attempting to publish a transaction to mempool
     MempoolAccept(AcceptToMempoolError),
+
+    /// The `setban` command argument was not "add" or "remove".
+    InvalidSetBanCommand,
 }
 
 impl_error_from!(JsonRpcError, AcceptToMempoolError, MempoolAccept);
@@ -259,6 +262,7 @@ impl Display for JsonRpcError {
             JsonRpcError::InvalidDisconnectNodeCommand => write!(f, "Invalid disconnectnode command"),
             JsonRpcError::PeerNotFound => write!(f, "Peer not found in the peer list"),
             JsonRpcError::MempoolAccept(e) => write!(f, "Could not send transaction to mempool due to {e}"),
+            JsonRpcError::InvalidSetBanCommand => write!(f, "Invalid setban command, must be 'add' or 'remove'"),
         }
     }
 }

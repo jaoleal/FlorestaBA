@@ -93,6 +93,29 @@ pub enum UserRequest {
 
     /// Adds a transaction to mempool and advertises it
     SendTransaction(Transaction),
+
+    /// Ban an IP address for `duration` seconds (0 = 24 h default).
+    SetBan(IpAddr, u64),
+
+    /// Remove a ban for an IP address.
+    UnsetBan(IpAddr),
+
+    /// Remove all bans.
+    ClearBans,
+
+    /// Return all currently active bans.
+    ListBans,
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// An active peer ban entry returned by `listbans`.
+pub struct BanEntry {
+    /// IP address that is banned.
+    pub address: String,
+    /// Unix timestamp when the ban was created.
+    pub ban_created: u64,
+    /// Unix timestamp when the ban expires.
+    pub banned_until: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +174,18 @@ pub enum NodeResponse {
 
     /// Transaction broadcast
     TransactionBroadcastResult(Result<Txid, AcceptToMempoolError>),
+
+    /// Whether the ban was successfully added.
+    SetBan(bool),
+
+    /// Whether the ban was found and removed.
+    UnsetBan(bool),
+
+    /// Whether all bans were cleared.
+    ClearBans(bool),
+
+    /// Active bans.
+    ListBans(Vec<BanEntry>),
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +348,40 @@ impl NodeInterface {
         let val = self.send_request(UserRequest::Ping).await?;
 
         extract_variant!(Ping, val)
+    }
+
+    /// Bans an IP address for `duration` seconds (0 = 24 h default).
+    pub async fn set_ban(
+        &self,
+        addr: IpAddr,
+        duration: u64,
+    ) -> Result<bool, oneshot::error::RecvError> {
+        let val = self
+            .send_request(UserRequest::SetBan(addr, duration))
+            .await?;
+
+        extract_variant!(SetBan, val)
+    }
+
+    /// Removes the ban for an IP address.
+    pub async fn unset_ban(&self, addr: IpAddr) -> Result<bool, oneshot::error::RecvError> {
+        let val = self.send_request(UserRequest::UnsetBan(addr)).await?;
+
+        extract_variant!(UnsetBan, val)
+    }
+
+    /// Removes all active bans.
+    pub async fn clear_bans(&self) -> Result<bool, oneshot::error::RecvError> {
+        let val = self.send_request(UserRequest::ClearBans).await?;
+
+        extract_variant!(ClearBans, val)
+    }
+
+    /// Returns all currently active bans.
+    pub async fn list_bans(&self) -> Result<Vec<BanEntry>, oneshot::error::RecvError> {
+        let val = self.send_request(UserRequest::ListBans).await?;
+
+        extract_variant!(ListBans, val)
     }
 }
 

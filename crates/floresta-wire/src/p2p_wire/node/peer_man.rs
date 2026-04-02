@@ -34,6 +34,7 @@ use crate::node::running_ctx::RunningNode;
 use crate::node::try_and_log;
 use crate::node_context::NodeContext;
 use crate::node_context::PeerId;
+use crate::node_interface::BanEntry;
 use crate::node_interface::NodeResponse;
 use crate::node_interface::PeerInfo;
 use crate::node_interface::UserRequest;
@@ -828,6 +829,38 @@ where
             kind: peer.kind,
             transport_protocol: peer.transport_protocol,
         })
+    }
+
+    // === BANMAN ===
+
+    /// Returns all currently active bans as [`BanEntry`] structs.
+    pub(crate) fn handle_list_bans(&self) -> Vec<BanEntry> {
+        self.common
+            .ban_man
+            .list_bans()
+            .into_iter()
+            .map(|(ip, record)| BanEntry {
+                address: ip.to_string(),
+                ban_created: record.ban_created,
+                banned_until: record.ban_until,
+            })
+            .collect()
+    }
+
+    /// Disconnects any currently connected peer whose IP matches `ip`.
+    ///
+    /// Called after `setban` to enforce the ban immediately.
+    pub(crate) fn handle_ban_connected_peer(&mut self, ip: IpAddr) {
+        let to_disconnect: Vec<u32> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.address == ip)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for peer_id in to_disconnect {
+            let _ = self.send_to_peer(peer_id, NodeRequest::Shutdown);
+        }
     }
 
     // === ADDNODE ===
