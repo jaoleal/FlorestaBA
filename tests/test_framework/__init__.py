@@ -12,29 +12,29 @@ The difference is that `florestad` will run under a `cargo run` subprocess, whic
 `add_node_settings`.
 """
 
-import os
-import re
-import sys
+import contextlib
 import copy
+import os
 import random
-import socket
+import re
 import shutil
 import signal
-import contextlib
+import socket
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Pattern, Tuple, Optional
+from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 from test_framework.crypto.pkcs8 import (
     create_pkcs8_private_key,
     create_pkcs8_self_signed_certificate,
 )
 from test_framework.daemon import ConfigP2P
-from test_framework.rpc import ConfigRPC
 from test_framework.electrum import ConfigElectrum, ConfigTls
 from test_framework.node import Node, NodeType
+from test_framework.rpc import ConfigRPC
 from test_framework.util import Utility
 
 
@@ -327,6 +327,29 @@ class FlorestaTestFramework:
         raise AssertionError(
             f"Peers {peer_one.variant} and {peer_two.variant} failed to reach the expected "
             f"connection state within the timeout. Expected connected: {is_connected}."
+        )
+
+    def wait_for_sync(self, node: Node, target_height: int, timeout: float = 120):
+        """
+        Wait until a node is synced to the target height and out of IBD.
+
+        Raises AssertionError if the node does not reach the expected state
+        within the timeout.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            info = node.rpc.get_blockchain_info()
+            if info["height"] == target_height and not info["ibd"]:
+                self.log.debug(
+                    f"Node '{node.variant}' synced to height {target_height}"
+                )
+                return
+            time.sleep(1)
+
+        info = node.rpc.get_blockchain_info()
+        raise AssertionError(
+            f"Node '{node.variant}' failed to sync to height {target_height} "
+            f"within {timeout}s: height={info['height']}, ibd={info['ibd']}"
         )
 
     def connect_nodes(
