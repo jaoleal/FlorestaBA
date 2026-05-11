@@ -89,3 +89,10 @@ opt-level = 3     # maximum optimization level
 strip = true      # strip symbol tables and metadata
 lto = true        # enable link-time optimizations
 codegen-units = 1 # compile a single codegen unit
+
+# Temporary patch: use jaoleal/rust-bitcoinkernel android_support branch
+# until Android support is merged upstream into sedited/rust-bitcoinkernel
+# and published to crates.io.
+[patch.crates-io]
+bitcoinkernel = { git = "https://github.com/jaoleal/rust-bitcoinkernel", branch = "android_support" }
+libbitcoinkernel-sys = { git = "https://github.com/jaoleal/rust-bitcoinkernel", branch = "android_support" }
