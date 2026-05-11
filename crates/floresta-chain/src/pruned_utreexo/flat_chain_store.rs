@@ -1241,7 +1241,7 @@ impl ChainStore for FlatChainStore {
             },
             DiskBlockHeader::InFork(_, _)
             | DiskBlockHeader::Orphan(_)
-            | DiskBlockHeader::InvalidChain(_) => unsafe { self.save_fork_block(*header) },
+            | DiskBlockHeader::InvalidChain(_, _, _) => unsafe { self.save_fork_block(*header) },
         }
     }
 

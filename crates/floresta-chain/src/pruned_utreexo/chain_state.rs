@@ -55,6 +55,7 @@ use super::chain_state_builder::BlockchainBuilderError;
 use super::chain_state_builder::ChainStateBuilder;
 use super::chainparams::ChainParams;
 use super::chainstore::DiskBlockHeader;
+use super::chainstore::InvalidReason;
 use super::consensus::Consensus;
 use super::error::BlockValidationErrors;
 use super::error::BlockchainError;
@@ -404,7 +405,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
                         header.block_hash()
                     ))));
                 }
-                Some(DiskBlockHeader::InvalidChain(header)) => {
+                Some(DiskBlockHeader::InvalidChain(header, _, _)) => {
                     return Err(BlockchainError::InvalidTip(format(format_args!(
                         "Block {} is invalid",
                         header.block_hash()
@@ -481,7 +482,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
                     ))))
                 }
                 DiskBlockHeader::HeadersOnly(_, _) | DiskBlockHeader::InFork(_, _) => {}
-                DiskBlockHeader::InvalidChain(_) => {
+                DiskBlockHeader::InvalidChain(_, _, _) => {
                     return Err(BlockchainError::InvalidTip(format(format_args!(
                         "Block {} is in an invalid chain",
                         _header.block_hash()
@@ -1292,12 +1293,23 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             return Err(BlockchainError::BlockNotPresent);
         }
 
-        // Mark all blocks after this one as invalid
-        for h in height_to_invalidate..=current_height {
+        // Mark the target block as UserInvalidated
+        let header = self.get_block_header(&block)?;
+        self.update_header(&DiskBlockHeader::InvalidChain(
+            header,
+            height_to_invalidate,
+            InvalidReason::UserInvalidated,
+        ))?;
+
+        // Mark all descendants as DescendsFromInvalid
+        for h in (height_to_invalidate + 1)..=current_height {
             let hash = self.get_block_hash(h)?;
             let header = self.get_block_header(&hash)?;
-            let new_header = DiskBlockHeader::InvalidChain(header);
-            self.update_header(&new_header)?;
+            self.update_header(&DiskBlockHeader::InvalidChain(
+                header,
+                h,
+                InvalidReason::DescendsFromInvalid,
+            ))?;
         }
 
         let new_tip = self
@@ -1351,7 +1363,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             DiskBlockHeader::Orphan(_)
             | DiskBlockHeader::AssumedValid(_, _) // this will be validated by a partial chain
             | DiskBlockHeader::InFork(_, _)
-            | DiskBlockHeader::InvalidChain(_) => return Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?,
+            | DiskBlockHeader::InvalidChain(_, _, _) => return Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?,
 
             DiskBlockHeader::HeadersOnly(_, height) => {
                 let validation_index = self.get_validation_index()?;
