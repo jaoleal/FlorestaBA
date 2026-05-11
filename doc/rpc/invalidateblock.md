@@ -29,11 +29,11 @@ Returns `null` on success.
 
 ### Error Enum `CommandError`
 
-* `JsonRpcError::BlockNotFound` - If the specified block hash is not found in the blockchain or the invalidation fails.
+- `JsonRpcError::BlockNotFound` - If the specified block hash is not found in the blockchain or the invalidation fails.
 
 ## Notes
 
 - This is a hidden RPC in Bitcoin Core, intended for testing and debugging.
 - The accumulator state is not modified; only the best known block and validation index are rolled back.
 - All blocks from the invalidated height up to the current tip are marked as `InvalidChain`.
-- There is currently no `reconsiderblock` equivalent to undo this operation.
+- Use `reconsiderblock` to undo the effect of this operation.

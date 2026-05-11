@@ -30,6 +30,10 @@ class FlorestaRPC(BaseRPC):
         """Marks a block as invalid"""
         return self.perform_request("invalidateblock", params=[blockhash])
 
+    def reconsider_block(self, blockhash: str):
+        """Removes the invalid state from a previously invalidated block"""
+        return self.perform_request("reconsiderblock", params=[blockhash])
+
     def submit_header(self, hexdata: str):
         """Submits a raw block header as a candidate chain tip"""
         return self.perform_request("submitheader", params=[hexdata])

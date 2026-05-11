@@ -150,6 +150,9 @@ pub trait FlorestaRPC {
     #[doc = include_str!("../../../doc/rpc/invalidateblock.md")]
     fn invalidate_block(&self, blockhash: BlockHash) -> Result<()>;
 
+    #[doc = include_str!("../../../doc/rpc/reconsiderblock.md")]
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()>;
+
     #[doc = include_str!("../../../doc/rpc/submitheader.md")]
     fn submit_header(&self, hexdata: String) -> Result<()>;
 }
@@ -351,6 +354,10 @@ impl<T: JsonRPCClient> FlorestaRPC for T {
 
     fn invalidate_block(&self, blockhash: BlockHash) -> Result<()> {
         self.call("invalidateblock", &[Value::String(blockhash.to_string())])
+    }
+
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()> {
+        self.call("reconsiderblock", &[Value::String(blockhash.to_string())])
     }
 
     fn submit_header(&self, hexdata: String) -> Result<()> {

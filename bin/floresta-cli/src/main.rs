@@ -134,6 +134,9 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
         Methods::InvalidateBlock { blockhash } => {
             serde_json::to_string_pretty(&client.invalidate_block(blockhash)?)?
         }
+        Methods::ReconsiderBlock { blockhash } => {
+            serde_json::to_string_pretty(&client.reconsider_block(blockhash)?)?
+        }
         Methods::SubmitHeader { hexdata } => {
             serde_json::to_string_pretty(&client.submit_header(hexdata)?)?
         }
@@ -400,6 +403,15 @@ pub enum Methods {
         disable_help_subcommand = true
     )]
     InvalidateBlock { blockhash: BlockHash },
+
+    #[doc = include_str!("../../../doc/rpc/reconsiderblock.md")]
+    #[command(
+        name = "reconsiderblock",
+        about = "Removes the invalid state from a previously invalidated block.",
+        long_about = Some(include_str!("../../../doc/rpc/reconsiderblock.md")),
+        disable_help_subcommand = true
+    )]
+    ReconsiderBlock { blockhash: BlockHash },
 
     #[doc = include_str!("../../../doc/rpc/submitheader.md")]
     #[command(

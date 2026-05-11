@@ -321,6 +321,13 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             .map_err(|_| JsonRpcError::BlockNotFound)
     }
 
+    // reconsiderblock
+    pub(super) fn reconsider_block(&self, hash: BlockHash) -> Result<(), JsonRpcError> {
+        self.chain
+            .reconsider_block(hash)
+            .map_err(|_| JsonRpcError::BlockNotFound)
+    }
+
     // submitheader
     pub(super) fn submit_header(&self, hex: String) -> Result<(), JsonRpcError> {
         let bytes = Vec::from_hex(&hex).map_err(|_| JsonRpcError::InvalidHex)?;

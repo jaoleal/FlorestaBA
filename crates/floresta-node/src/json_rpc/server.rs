@@ -321,6 +321,12 @@ async fn handle_json_rpc_request(
             Ok(Value::Null)
         }
 
+        "reconsiderblock" => {
+            let hash = get_hash(&params, 0, "blockhash")?;
+            state.reconsider_block(hash)?;
+            Ok(Value::Null)
+        }
+
         "submitheader" => {
             let hex = get_string(&params, 0, "hexdata")?;
             state.submit_header(hex)?;
