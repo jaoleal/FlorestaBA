@@ -549,6 +549,52 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         Ok(())
     }
 
+    /// Compares a candidate chain tip against the current best chain and
+    /// activates it if it has more work. If the candidate loses, it is
+    /// stored as an alternative tip with `InFork` status.
+    ///
+    /// Unlike `reorg()`, this method does not call `find_fork_point()` or
+    /// `mark_chain_as_active/inactive`, so it is safe to call after
+    /// `reconsider_block` where the reconsidered blocks are already indexed
+    /// as `HeadersOnly` on the main chain.
+    ///
+    /// Analogous to Bitcoin Core's `ActivateBestChain`.
+    fn activate_best_chain(&self, candidate_tip: BlockHeader) -> Result<(), BlockchainError> {
+        let current_tip = self.get_block_header(&self.get_best_block()?.1)?;
+        let candidate_height = self.get_chain_depth(&candidate_tip)?;
+        let current_height = self.get_height()?;
+
+        let current_work = self.get_branch_work(current_tip)?;
+        let candidate_work = if candidate_height > current_height {
+            self.get_branch_work(candidate_tip)?
+        } else {
+            let fork_point = self.find_fork_point(&candidate_tip)?;
+            self.get_fork_work(candidate_tip, fork_point.block_hash())?
+        };
+
+        if candidate_work > current_work {
+            let validation_index = self.get_last_valid_block(&candidate_tip)?;
+            self.change_active_chain(&candidate_tip, validation_index, candidate_height);
+        } else {
+            self.push_alt_tip(&candidate_tip)?;
+            let mut header = candidate_tip;
+            let mut h = candidate_height;
+            while !self.is_genesis(&header) {
+                let disk = self.get_disk_block_header(&header.block_hash())?;
+                match disk {
+                    DiskBlockHeader::HeadersOnly(_, _) => {
+                        self.update_header(&DiskBlockHeader::InFork(header, h))?;
+                    }
+                    _ => break,
+                }
+                header = *self.get_ancestor(&header)?;
+                h -= 1;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns the chain_params struct for the current network
     fn chain_params(&self) -> ChainParams {
         let inner = read_lock!(self);
@@ -1323,6 +1369,61 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         Ok(())
     }
 
+    fn reconsider_block(&self, block: BlockHash) -> Result<(), BlockchainError> {
+        let disk_header = self.get_disk_block_header(&block)?;
+
+        // Only reconsider blocks that were user-invalidated
+        let height = match disk_header {
+            DiskBlockHeader::InvalidChain(_, h, InvalidReason::UserInvalidated) => h,
+            DiskBlockHeader::InvalidChain(_, _, InvalidReason::ValidationFailed) => {
+                return Err(BlockchainError::BlockValidation(
+                    BlockValidationErrors::BlockExtendsAnOrphanChain,
+                ));
+            }
+            _ => return Ok(()),
+        };
+
+        // Restore the target block to HeadersOnly.
+        // We use update_header_and_index because invalidate_block moved the
+        // header to the fork file (via save_fork_block), which updated the
+        // hash→position index to point at the fork storage. We need to write
+        // the header back to the main storage and fix the index entry.
+        let header_hash = block;
+        self.update_header_and_index(
+            &DiskBlockHeader::HeadersOnly(*disk_header, height),
+            header_hash,
+            height,
+        )?;
+
+        // Walk forward, restoring DescendsFromInvalid descendants to HeadersOnly.
+        // Stop at ValidationFailed, UserInvalidated, or non-invalid blocks.
+        let mut last_reconsidered_height = height;
+        for h in (height + 1).. {
+            let hash = match read_lock!(self).chainstore.get_block_hash(h)? {
+                Some(hash) => hash,
+                None => break,
+            };
+            let dh = self.get_disk_block_header(&hash)?;
+            match dh {
+                DiskBlockHeader::InvalidChain(hdr, _, InvalidReason::DescendsFromInvalid) => {
+                    self.update_header_and_index(&DiskBlockHeader::HeadersOnly(hdr, h), hash, h)?;
+                    last_reconsidered_height = h;
+                }
+                _ => break,
+            }
+        }
+
+        // Delegate chain selection to activate_best_chain
+        let reconsidered_tip_hash = read_lock!(self)
+            .chainstore
+            .get_block_hash(last_reconsidered_height)?
+            .ok_or(BlockchainError::BlockNotPresent)?;
+        let reconsidered_tip = self.get_block_header(&reconsidered_tip_hash)?;
+        self.activate_best_chain(reconsidered_tip)?;
+
+        Ok(())
+    }
+
     fn toggle_ibd(&self, is_ibd: bool) {
         let mut inner = write_lock!(self);
         inner.ibd = is_ibd;
@@ -1570,6 +1671,7 @@ mod test {
     use super::ChainParams;
     use super::ChainState;
     use super::DiskBlockHeader;
+    use super::InvalidReason;
     use super::UpdatableChainstate;
     use crate::extensions::WorkExt;
     use crate::prelude::HashMap;
@@ -2099,5 +2201,107 @@ mod test {
                 "expected InvalidChain, got: {invalid_header:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_reconsider_block() {
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Hardcoded);
+        let json_blocks = include_str!("../../testdata/test_reorg.json");
+        let blocks: Vec<Vec<&str>> = serde_json::from_str(json_blocks).unwrap();
+
+        // Connect the first 10 blocks (they become FullyValid)
+        let short_chain: Vec<Block> = blocks[0]
+            .iter()
+            .map(|s| deserialize_hex(s).unwrap())
+            .collect();
+
+        for block in &short_chain {
+            chain.accept_header(block.header).unwrap();
+            chain
+                .connect_block(block, Proof::default(), HashMap::new(), Vec::new())
+                .unwrap();
+        }
+
+        assert_eq!(chain.get_height().unwrap(), 10);
+
+        // Invalidate block at height 5
+        let hash_at_5 = chain.get_block_hash(5).unwrap();
+        chain.invalidate_block(hash_at_5).unwrap();
+
+        assert_eq!(chain.get_height().unwrap(), 4);
+        assert_eq!(chain.get_validation_index().unwrap(), 4);
+
+        // Reconsider block at height 5
+        chain.reconsider_block(hash_at_5).unwrap();
+
+        // The reconsidered chain has more work than the current tip (height 4),
+        // so activate_best_chain should trigger a reorg back to height 10.
+        assert_eq!(chain.get_height().unwrap(), 10);
+
+        // Blocks 5..=10 should now be HeadersOnly (pending re-validation)
+        for i in 5..=10 {
+            let hash = read_lock!(chain)
+                .chainstore
+                .get_block_hash(i)
+                .unwrap()
+                .unwrap();
+            let header = chain.get_disk_block_header(&hash).unwrap();
+            assert!(
+                matches!(header, DiskBlockHeader::HeadersOnly(..)),
+                "expected HeadersOnly at height {i}, got: {header:?}"
+            );
+        }
+
+        // Blocks 0..=4 should still be FullyValid
+        for i in 0..=4 {
+            let hash = read_lock!(chain)
+                .chainstore
+                .get_block_hash(i)
+                .unwrap()
+                .unwrap();
+            let header = chain.get_disk_block_header(&hash).unwrap();
+            assert!(
+                matches!(header, DiskBlockHeader::FullyValid(..)),
+                "expected FullyValid at height {i}, got: {header:?}"
+            );
+        }
+
+        // validation_index should be at block 4 (last FullyValid block)
+        let val_idx = chain.get_validation_index().unwrap();
+        assert_eq!(val_idx, 4);
+    }
+
+    #[test]
+    fn test_reconsider_block_validation_failed() {
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Hardcoded);
+        let json_blocks = include_str!("../../testdata/test_reorg.json");
+        let blocks: Vec<Vec<&str>> = serde_json::from_str(json_blocks).unwrap();
+
+        let short_chain: Vec<Block> = blocks[0]
+            .iter()
+            .map(|s| deserialize_hex(s).unwrap())
+            .collect();
+
+        for block in &short_chain {
+            chain.accept_header(block.header).unwrap();
+            chain
+                .connect_block(block, Proof::default(), HashMap::new(), Vec::new())
+                .unwrap();
+        }
+
+        // Manually mark block 5 as ValidationFailed (simulating a consensus failure)
+        let hash_at_5 = chain.get_block_hash(5).unwrap();
+        let header_at_5 = chain.get_block_header(&hash_at_5).unwrap();
+        chain
+            .update_header(&DiskBlockHeader::InvalidChain(
+                header_at_5,
+                5,
+                InvalidReason::ValidationFailed,
+            ))
+            .unwrap();
+
+        // Attempting to reconsider a ValidationFailed block should error
+        let result = chain.reconsider_block(hash_at_5);
+        assert!(result.is_err());
     }
 }
