@@ -58,6 +58,34 @@ pub struct GetBlockchainInfoRes {
     pub difficulty: u64,
 }
 
+/// The lifecycle state of an indexable service, as returned by `getindexinfo`.
+///
+/// Serialized as an internally tagged enum so the RPC response carries the
+/// real service state for operators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IndexState {
+    /// The index is not enabled in this node configuration.
+    Deactivated,
+    /// The index is registered but hasn't started processing yet.
+    ToStart,
+    /// The index is actively syncing.
+    Ongoing {
+        /// The height of the best block this index has processed so far.
+        best_block_height: u32,
+    },
+    /// The index has caught up and is fully synced.
+    Done {
+        /// The height of the best block this index has processed.
+        best_block_height: u32,
+    },
+    /// The index encountered an error querying its state.
+    Error {
+        /// A human-readable description of the error.
+        message: String,
+    },
+}
+
 /// The information returned by a get_raw_tx
 #[derive(Deserialize, Serialize)]
 pub struct RawTx {
