@@ -33,6 +33,49 @@ pub struct GetBlockchainInfoRes {
     pub difficulty: u64,
 }
 
+/// The lifecycle state of an indexable service.
+///
+/// Serialized as an internally tagged enum so the RPC response carries the
+/// real service state for operators, not just a lossy `synced` boolean.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IndexState {
+    /// The index is not enabled in this node configuration
+    /// (e.g. cfilters disabled with `--no-cfilters`, backfill without assume-utreexo).
+    Deactivated,
+    /// The index is registered but hasn't started processing yet
+    /// (e.g. backfill waiting for IBD to finish).
+    ToStart,
+    /// The index is actively syncing.
+    Ongoing { best_block_height: u32 },
+    /// The index has caught up and is fully synced.
+    Done { best_block_height: u32 },
+    /// The index encountered an error querying its state.
+    Error { message: String },
+}
+
+/// A single index entry reported by an [`IndexProvider`].
+pub struct IndexEntry {
+    /// Static name identifying this index (e.g. `"block_filter"`, `"backfill"`).
+    pub name: &'static str,
+    /// Current state of the index.
+    pub state: IndexState,
+}
+
+/// Implemented by components on [`RpcImpl`](super::server::RpcImpl) that own
+/// indexable services.
+///
+/// Each implementor returns a list of [`IndexEntry`] values describing the
+/// indices it controls. The RPC handler collects these into the `getindexinfo`
+/// response.
+pub trait IndexProvider {
+    /// Returns the status of all indexable services this component controls.
+    ///
+    /// `chain_tip` is the current best chain height, needed by providers that
+    /// determine their sync state relative to it.
+    fn index_summary(&self, chain_tip: u32) -> Vec<IndexEntry>;
+}
+
 /// A confidence enum to auxiliate rescan timestamp values.
 ///
 /// Serves to tell how much confidence you need in such a rescan request. That is, the need for a high confidence rescan
