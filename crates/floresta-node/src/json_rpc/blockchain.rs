@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use bitcoin::block::Header;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::consensus::Encodable;
@@ -20,6 +23,9 @@ use corepc_types::v30::GetBlockVerboseOne;
 use corepc_types::ScriptPubkey;
 use floresta_chain::extensions::HeaderExt;
 use floresta_chain::extensions::WorkExt;
+use floresta_compact_filters::flat_filters_store::FlatFiltersStore;
+use floresta_compact_filters::network_filters::NetworkFilters;
+use floresta_wire::BackfillStatusHandle;
 use miniscript::descriptor::checksum;
 use serde_json::json;
 use serde_json::Value;
@@ -28,11 +34,74 @@ use tracing::debug;
 use super::res::GetBlockHeaderRes;
 use super::res::GetBlockchainInfoRes;
 use super::res::GetTxOutProof;
+use super::res::IndexEntry;
+use super::res::IndexProvider;
+use super::res::IndexState;
 use super::res::JsonRpcError;
 use super::server::RpcChain;
 use super::server::RpcImpl;
 use crate::json_rpc::res::GetBlockRes;
 use crate::json_rpc::res::RescanConfidence;
+
+impl IndexProvider for Arc<NetworkFilters<FlatFiltersStore>> {
+    fn index_summary(&self, chain_tip: u32) -> Vec<IndexEntry> {
+        let height = match self.get_height() {
+            Ok(h) => h,
+            Err(e) => {
+                return vec![IndexEntry {
+                    name: "block_filter",
+                    state: IndexState::Error {
+                        message: e.to_string(),
+                    },
+                }];
+            }
+        };
+        let state = if height >= chain_tip {
+            IndexState::Done {
+                best_block_height: height,
+            }
+        } else {
+            IndexState::Ongoing {
+                best_block_height: height,
+            }
+        };
+        vec![IndexEntry {
+            name: "block_filter",
+            state,
+        }]
+    }
+}
+
+impl IndexProvider for BackfillStatusHandle {
+    fn index_summary(&self, _chain_tip: u32) -> Vec<IndexEntry> {
+        let status = match self.read() {
+            Ok(s) => s,
+            Err(e) => {
+                return vec![IndexEntry {
+                    name: "backfill",
+                    state: IndexState::Error {
+                        message: e.to_string(),
+                    },
+                }];
+            }
+        };
+        let state = if status.done {
+            IndexState::Done {
+                best_block_height: status.current_height,
+            }
+        } else if status.current_height == 0 && status.target_height == 0 {
+            IndexState::ToStart
+        } else {
+            IndexState::Ongoing {
+                best_block_height: status.current_height,
+            }
+        };
+        vec![IndexEntry {
+            name: "backfill",
+            state,
+        }]
+    }
+}
 
 impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     async fn get_block_inner(&self, hash: BlockHash) -> Result<Block, JsonRpcError> {
@@ -270,6 +339,55 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             difficulty: latest_header.difficulty(self.chain.get_params()) as u64,
             progress: validated_percentage,
         })
+    }
+
+    // getindexinfo
+    pub(super) fn get_index_info(
+        &self,
+        index_name: Option<String>,
+    ) -> Result<BTreeMap<String, IndexState>, JsonRpcError> {
+        let chain_tip = self.chain.get_height().map_err(|_| JsonRpcError::Chain)?;
+        let mut indices = BTreeMap::new();
+
+        for entry in self.gather_index_entries(chain_tip) {
+            indices.insert(entry.name.to_string(), entry.state);
+        }
+
+        // Filter by name if requested
+        if let Some(name) = index_name {
+            return Ok(indices
+                .remove(&name)
+                .map(|state| BTreeMap::from([(name, state)]))
+                .unwrap_or_default());
+        }
+
+        Ok(indices)
+    }
+
+    /// Collects index entries from all known indexable services.
+    ///
+    /// Services that are not enabled in this node configuration are reported
+    /// as [`IndexState::Deactivated`].
+    fn gather_index_entries(&self, chain_tip: u32) -> Vec<IndexEntry> {
+        let mut entries = Vec::new();
+
+        match &self.block_filter_storage {
+            Some(storage) => entries.extend(storage.index_summary(chain_tip)),
+            None => entries.push(IndexEntry {
+                name: "block_filter",
+                state: IndexState::Deactivated,
+            }),
+        }
+
+        match &self.backfill_status {
+            Some(status) => entries.extend(status.index_summary(chain_tip)),
+            None => entries.push(IndexEntry {
+                name: "backfill",
+                state: IndexState::Deactivated,
+            }),
+        }
+
+        entries
     }
 
     // getblockcount
@@ -712,5 +830,65 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             .get_descriptors()
             .map_err(|e| JsonRpcError::Wallet(e.to_string()))?;
         Ok(descriptors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backfill_provider_to_start() {
+        let handle = BackfillStatusHandle::default();
+        // default: current_height=0, target_height=0, done=false → ToStart
+        let entries = handle.index_summary(100);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "backfill");
+        assert_eq!(entries[0].state, IndexState::ToStart);
+    }
+
+    #[test]
+    fn test_backfill_provider_ongoing() {
+        let handle = BackfillStatusHandle::default();
+        {
+            let mut status = handle.write().unwrap();
+            status.current_height = 50;
+            status.target_height = 200;
+            status.done = false;
+        }
+
+        let entries = handle.index_summary(200);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "backfill");
+        assert_eq!(
+            entries[0].state,
+            IndexState::Ongoing {
+                best_block_height: 50
+            }
+        );
+    }
+
+    #[test]
+    fn test_backfill_provider_done() {
+        let handle = BackfillStatusHandle::default();
+        {
+            let mut status = handle.write().unwrap();
+            status.current_height = 200;
+            status.target_height = 200;
+            status.done = true;
+        }
+
+        let entries = handle.index_summary(200);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "backfill");
+        assert_eq!(
+            entries[0].state,
+            IndexState::Done {
+                best_block_height: 200
+            }
+        );
     }
 }
