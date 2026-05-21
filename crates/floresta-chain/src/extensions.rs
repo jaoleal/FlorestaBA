@@ -105,6 +105,58 @@ pub enum HeaderExtError {
     ChainWorkOverflow,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// The possible states of a BIP 9 soft-fork deployment.
+pub enum ThresholdState {
+    /// The deployment is not yet active and has not been signaled for.
+    Defined,
+
+    /// MTP has passed the deployment's start_time; miners may now signal.
+    Started,
+
+    /// Enough miners signaled in a retarget period; activation is locked in.
+    LockedIn,
+
+    /// The deployment is active and its rules are enforced.
+    Active,
+
+    /// MTP passed the timeout without reaching threshold; deployment failed.
+    Failed,
+}
+
+/// Defines a BIP 9 soft-fork deployment.
+pub struct Bip9Deployment {
+    /// Human-readable name for the deployment (e.g. "csv", "segwit", "taproot").
+    pub name: &'static str,
+
+    /// The version bit used for signaling (0..=28).
+    pub bit: u8,
+
+    /// The MTP value at which signaling begins (Unix timestamp).
+    pub start_time: u32,
+
+    /// The MTP value at which the deployment times out (Unix timestamp).
+    pub timeout: u32,
+}
+
+/// Extension trait for BIP 9 version bits soft-fork detection on block headers.
+pub trait Bip9Ext {
+    /// Returns `true` if this block's nVersion signals for the given bit
+    /// according to BIP 9 rules (top 3 bits are `001` and the specified bit is set).
+    fn is_signaling(&self, bit: u8) -> bool;
+
+    /// Computes the BIP 9 deployment state at this block's position in the chain.
+    ///
+    /// The state machine is evaluated at retarget period boundaries
+    /// (`miner_confirmation_window` blocks). Blocks between boundaries inherit
+    /// the state from the previous boundary.
+    fn bip9_state(
+        &self,
+        deployment: &Bip9Deployment,
+        chain: &impl BlockchainInterface,
+    ) -> Result<ThresholdState, HeaderExtError>;
+}
+
 impl HeaderExt for Header {
     fn calculate_median_time_past(
         &self,
@@ -194,6 +246,89 @@ impl HeaderExt for Header {
     }
 }
 
+impl Bip9Ext for Header {
+    fn is_signaling(&self, bit: u8) -> bool {
+        self.version.is_signalling_soft_fork(bit)
+    }
+
+    fn bip9_state(
+        &self,
+        deployment: &Bip9Deployment,
+        chain: &impl BlockchainInterface,
+    ) -> Result<ThresholdState, HeaderExtError> {
+        let params = chain.get_params();
+        let window = params.miner_confirmation_window;
+        let threshold = params.rule_change_activation_threshold;
+
+        let height = self.get_height(chain)?;
+
+        // Genesis block is always Defined.
+        if height == 0 {
+            return Ok(ThresholdState::Defined);
+        }
+
+        // Find the start of this block's retarget period.
+        let period_start = height - (height % window);
+
+        // Walk forward from Defined, transitioning at each boundary.
+        let mut state = ThresholdState::Defined;
+
+        for boundary_height in (window..=period_start).step_by(window as usize) {
+            // MTP of the last block in the previous period.
+            let prev_hash = chain
+                .get_block_hash(boundary_height - 1)
+                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+            let prev_header = chain
+                .get_block_header(&prev_hash)
+                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+            let mtp = prev_header.calculate_median_time_past(chain)?;
+
+            state = match state {
+                ThresholdState::Defined => match mtp >= deployment.timeout {
+                    true => ThresholdState::Failed,
+                    false if mtp >= deployment.start_time => ThresholdState::Started,
+                    false => ThresholdState::Defined,
+                },
+                ThresholdState::Started => {
+                    if mtp >= deployment.timeout {
+                        ThresholdState::Failed
+                    } else {
+                        // Count signaling blocks in the previous period.
+                        let count_start = boundary_height - window;
+
+                        let mut count = 0u32;
+
+                        for block_h in count_start..boundary_height {
+                            let hash = chain
+                                .get_block_hash(block_h)
+                                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+
+                            let hdr = chain
+                                .get_block_header(&hash)
+                                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+
+                            if hdr.is_signaling(deployment.bit) {
+                                count += 1;
+                            }
+                        }
+
+                        if count >= threshold {
+                            ThresholdState::LockedIn
+                        } else {
+                            ThresholdState::Started
+                        }
+                    }
+                }
+                ThresholdState::LockedIn => ThresholdState::Active,
+                ThresholdState::Active => ThresholdState::Active,
+                ThresholdState::Failed => ThresholdState::Failed,
+            };
+        }
+
+        Ok(state)
+    }
+}
+
 impl From<ChainWorkOverflow> for HeaderExtError {
     fn from(_: ChainWorkOverflow) -> Self {
         Self::ChainWorkOverflow
@@ -278,6 +413,7 @@ mod tests {
     use std::sync::Arc;
 
     use bitcoin::block::Header;
+    use bitcoin::block::Version;
     use bitcoin::consensus::encode::deserialize_hex;
     use bitcoin::hashes::sha256::Hash as Sha256Hash;
     use bitcoin::params::Params;
@@ -434,7 +570,7 @@ mod tests {
         }
 
         fn get_params(&self) -> Params {
-            unimplemented!()
+            Params::new(bitcoin::Network::Regtest)
         }
 
         fn acc(&self) -> Stump {
@@ -467,6 +603,34 @@ mod tests {
             let hash = header.block_hash();
             mock_chain.add_block(hash, header, i);
             prev_blockhash = header.block_hash();
+        }
+
+        (mock_chain, headers)
+    }
+
+    /// Builds a mock chain where a callback controls the version of each block header.
+    fn get_chain_with_versions(
+        height: u32,
+        version_fn: impl Fn(u32) -> Version,
+    ) -> (MockBlockchainInterface, Vec<Header>) {
+        let mut mock_chain = MockBlockchainInterface::new();
+        let genesis_header = get_genesis_header();
+        let mut headers = vec![];
+        let mut prev_blockhash = genesis_header.block_hash();
+        mock_chain.add_block(prev_blockhash, genesis_header, 0);
+        headers.push(genesis_header);
+
+        for i in 1..height {
+            let header = Header {
+                version: version_fn(i),
+                time: 1231006505 + i * 600,
+                prev_blockhash,
+                ..genesis_header
+            };
+            headers.push(header);
+            let hash = header.block_hash();
+            mock_chain.add_block(hash, header, i);
+            prev_blockhash = hash;
         }
 
         (mock_chain, headers)
@@ -659,5 +823,145 @@ mod tests {
 
         assert_eq!(work.to_string_hex(), expected_hex_string);
         assert_eq!(work, expected_work);
+    }
+
+    // Regtest params: window = 144, threshold = 108 (75%).
+    // Genesis timestamp in tests: 1231006505.
+    // Block i timestamp: 1231006505 + i * 600.
+    fn test_deployment(bit: u8, start_time: u32, timeout: u32) -> Bip9Deployment {
+        Bip9Deployment {
+            name: "testdeploy",
+            bit,
+            start_time,
+            timeout,
+        }
+    }
+
+    #[test]
+    fn test_is_signaling_bip9() {
+        let genesis = get_genesis_header();
+
+        // BIP9 base + bit 0 set
+        let mut signaling = genesis;
+        signaling.version = Version::from_consensus(0x20000001);
+        assert!(signaling.is_signaling(0));
+        assert!(!signaling.is_signaling(1));
+
+        // BIP9 base, no bits set
+        let mut no_signal = genesis;
+        no_signal.version = Version::from_consensus(0x20000000);
+        assert!(!no_signal.is_signaling(0));
+
+        // Old-style version (no BIP9 top bits)
+        assert!(!genesis.is_signaling(0));
+    }
+
+    #[test]
+    fn test_bip9_state() {
+        // Regtest params: window = 144, threshold = 108 (75%).
+        // One chain of 450 signaling blocks covers Defined -> Started -> LockedIn -> Active.
+        let (signaling_chain, signaling_headers) =
+            get_chain_with_versions(450, |_| Version::from_consensus(0x20000001));
+        let deployment = test_deployment(0, 0, u32::MAX);
+
+        // Genesis is always Defined.
+        assert_eq!(
+            signaling_headers[0]
+                .bip9_state(&deployment, &signaling_chain)
+                .expect("genesis"),
+            ThresholdState::Defined,
+        );
+
+        // Before first boundary (height 143) — inherits Defined from genesis.
+        assert_eq!(
+            signaling_headers[143]
+                .bip9_state(&deployment, &signaling_chain)
+                .expect("before boundary"),
+            ThresholdState::Defined,
+        );
+
+        // First boundary (height 144): Defined -> Started (MTP > start_time=0).
+        assert_eq!(
+            signaling_headers[144]
+                .bip9_state(&deployment, &signaling_chain)
+                .expect("at boundary"),
+            ThresholdState::Started,
+        );
+
+        // Boundary 288: count [144..287] = 144 >= 108 -> LockedIn.
+        assert_eq!(
+            signaling_headers[289]
+                .bip9_state(&deployment, &signaling_chain)
+                .expect("locked in"),
+            ThresholdState::LockedIn,
+        );
+
+        // Boundary 432: LockedIn -> Active.
+        assert_eq!(
+            signaling_headers[440]
+                .bip9_state(&deployment, &signaling_chain)
+                .expect("active"),
+            ThresholdState::Active,
+        );
+
+        // Same chain, but a deployment whose start_time hasn't arrived — stays Defined.
+        let future_deployment = test_deployment(0, u32::MAX - 1, u32::MAX);
+        assert_eq!(
+            signaling_headers[200]
+                .bip9_state(&future_deployment, &signaling_chain)
+                .expect("defined before start"),
+            ThresholdState::Defined,
+        );
+
+        // Defined -> Failed: both start_time and timeout already passed.
+        let expired_deployment = test_deployment(0, 100, 200);
+        assert_eq!(
+            signaling_headers[200]
+                .bip9_state(&expired_deployment, &signaling_chain)
+                .expect("failed from defined"),
+            ThresholdState::Failed,
+        );
+
+        // Started -> Failed: no signaling chain, timeout reached after Started.
+        let (no_signal_chain, no_signal_headers) = get_chain_and_headers(300);
+        let mtp_at_143 = 1231006505 + 138 * 600;
+        let timeout_deployment = test_deployment(0, 0, mtp_at_143 + 1);
+        assert_eq!(
+            no_signal_headers[299]
+                .bip9_state(&timeout_deployment, &no_signal_chain)
+                .expect("failed from started"),
+            ThresholdState::Failed,
+        );
+
+        // Threshold not met: ~50% signaling (72/144) stays Started.
+        let (half_chain, half_headers) = get_chain_with_versions(300, |i| {
+            if i % 2 == 0 {
+                Version::from_consensus(0x20000001)
+            } else {
+                Version::from_consensus(0x20000000)
+            }
+        });
+
+        assert_eq!(
+            half_headers[289]
+                .bip9_state(&deployment, &half_chain)
+                .expect("threshold not met"),
+            ThresholdState::Started,
+        );
+
+        // Exactly at threshold: 108/144 signal -> LockedIn.
+        let (exact_chain, exact_headers) = get_chain_with_versions(300, |i| {
+            if i >= 144 && i <= 251 {
+                Version::from_consensus(0x20000001)
+            } else {
+                Version::from_consensus(0x20000000)
+            }
+        });
+        assert_eq!(
+            exact_headers[289]
+                .bip9_state(&deployment, &exact_chain)
+                .expect("exactly at threshold"),
+            ThresholdState::LockedIn,
+        );
     }
 }
