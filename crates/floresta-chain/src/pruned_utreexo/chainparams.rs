@@ -28,6 +28,8 @@ use floresta_common::bhash;
 use floresta_common::service_flags;
 use rustreexo::node_hash::BitcoinNodeHash;
 
+use crate::extensions::ActivationThreshold;
+use crate::extensions::Bip9Deployment;
 use crate::prelude::*;
 use crate::AssumeValidArg;
 
@@ -439,3 +441,88 @@ pub fn get_chain_dns_seeds(network: Network) -> Vec<DnsSeed> {
 
     seeds
 }
+
+/// BIPs 68/112/113 — relative lock-time (`nSequence`), `OP_CHECKSEQUENCEVERIFY`,
+/// and median-time-past as the lock-time clock.
+///
+/// - Bit 0, 95% threshold (1916/2016)
+/// - Locked in at block 419 328, active from block 421 344.
+///
+/// References:
+/// - [BIP 9: Version bits with timeout and delay](https://github.com/bitcoin/bips/blob/master/bip-0009.mediawiki)
+/// - [BIP 68: Relative lock-time using consensus-enforced sequence numbers](https://github.com/bitcoin/bips/blob/master/bip-0068.mediawiki)
+/// - [BIP 112: CHECKSEQUENCEVERIFY](https://github.com/bitcoin/bips/blob/master/bip-0112.mediawiki)
+/// - [BIP 113: Median time-past as endpoint for lock-time calculations](https://github.com/bitcoin/bips/blob/master/bip-0113.mediawiki)
+pub const CSV: Bip9Deployment = Bip9Deployment {
+    name: "csv",
+    bit: 0,
+    activation: ActivationThreshold::Time {
+        start_time: 1462060800, // 2016-05-01 00:00 UTC
+        timeout: 1493596800,    // 2017-05-01 00:00 UTC
+    },
+    period: None,    // network default (2016)
+    threshold: None, // network default (1916, 95%)
+};
+
+/// BIPs 141/143/144/147 — Segregated Witness.
+///
+/// - Bit 1, 95% threshold (1916/2016)
+/// - Locked in at block 477 792, active from block 481 824.
+///
+/// References:
+/// - [BIP 141: Segregated Witness (Consensus layer)](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki)
+/// - [BIP 143: Transaction Signature Verification for Version 0 Witness Program](https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki)
+/// - [BIP 144: Segregated Witness (Peer Services)](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki)
+/// - [BIP 147: Dealing with dummy stack element malleability](https://github.com/bitcoin/bips/blob/master/bip-0147.mediawiki)
+pub const SEGWIT: Bip9Deployment = Bip9Deployment {
+    name: "segwit",
+    bit: 1,
+    activation: ActivationThreshold::Time {
+        start_time: 1479168000, // 2016-11-15 00:00 UTC
+        timeout: 1510704000,    // 2017-11-15 00:00 UTC
+    },
+    period: None,
+    threshold: None,
+};
+
+/// BIP 91 — Segsignal (reduced-threshold SegWit signaling).
+///
+/// - Bit 4, 80% threshold (269/336), non-standard 336-block window
+/// - Locked in at block 477 120, active from block 477 456.
+///
+/// References:
+/// - [BIP 91: Reduced threshold Segwit MASF](https://github.com/bitcoin/bips/blob/master/bip-0091.mediawiki)
+pub const SEGSIGNAL: Bip9Deployment = Bip9Deployment {
+    name: "segsignal",
+    bit: 4,
+    activation: ActivationThreshold::Time {
+        start_time: 1496275200, // 2017-06-01 00:00 UTC
+        timeout: 1510704000,    // 2017-11-15 00:00 UTC
+    },
+    period: Some(336),
+    threshold: Some(269),
+};
+
+/// BIPs 340/341/342 — Taproot (Speedy Trial activation).
+///
+/// - Bit 2, 90% threshold (1815/2016), height-based start/timeout
+/// - Locked in at block 687 456, active from block 709 632.
+///
+/// References:
+/// - [BIP 340: Schnorr Signatures for secp256k1](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki)
+/// - [BIP 341: Taproot: SegWit version 1 spending rules](https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki)
+/// - [BIP 342: Validation of Taproot Scripts](https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki)
+pub const TAPROOT: Bip9Deployment = Bip9Deployment {
+    name: "taproot",
+    bit: 2,
+    activation: ActivationThreshold::Height {
+        start_height: 681408,
+        timeout_height: 709632,
+        min_activation_height: 709632,
+    },
+    period: None,
+    threshold: Some(1815),
+};
+
+/// All known mainnet BIP 9 deployments, in chronological activation order.
+pub const MAINNET_DEPLOYMENTS: &[Bip9Deployment] = &[CSV, SEGWIT, SEGSIGNAL, TAPROOT];
