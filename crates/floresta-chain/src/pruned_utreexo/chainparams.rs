@@ -359,7 +359,7 @@ impl From<Network> for ChainParams {
                 coinbase_maturity: 100,
                 exceptions,
                 enforce_bip94: false,
-                deployments: TESTNET_DEPLOYMENTS,
+                deployments: TESTNET3_DEPLOYMENTS,
             },
             Network::Testnet4 => ChainParams {
                 params: Params::new(network),
@@ -392,7 +392,7 @@ impl From<Network> for ChainParams {
                 coinbase_maturity: 100,
                 exceptions,
                 enforce_bip94: false,
-                deployments: &[],
+                deployments: REGTEST_DEPLOYMENTS,
             },
         }
     }
@@ -443,6 +443,10 @@ pub fn get_chain_dns_seeds(network: Network) -> Vec<DnsSeed> {
 
     seeds
 }
+
+// ---------------------------------------------------------------------------
+// Mainnet deployments
+// ---------------------------------------------------------------------------
 
 /// BIPs 68/112/113 — relative lock-time (`nSequence`), `OP_CHECKSEQUENCEVERIFY`,
 /// and median-time-past as the lock-time clock.
@@ -533,28 +537,74 @@ pub const TAPROOT: Bip9Deployment = Bip9Deployment {
 /// All known mainnet BIP 9 deployments, in chronological activation order.
 pub const MAINNET_DEPLOYMENTS: &[Bip9Deployment] = &[CSV, SEGWIT, SEGSIGNAL, TAPROOT];
 
-/// Known testnet3 BIP 9 deployments with their historical activation heights.
-pub const TESTNET_DEPLOYMENTS: &[Bip9Deployment] = &[
-    Bip9Deployment {
-        name: "csv",
-        bit: 0,
-        activation: ActivationThreshold::Time {
-            start_time: 1456790400, // 2016-03-01 00:00 UTC
-            timeout: 1493596800,    // 2017-05-01 00:00 UTC
-        },
-        period: None,
-        threshold: None,
-        activation_height: 770_112,
+/// CSV on testnet3 — earlier start, relaxed 75% threshold.
+///
+/// - Bit 0, 75% threshold (1512/2016)
+/// - Start: 2016-03-01, two months earlier than mainnet.
+pub const TESTNET3_CSV: Bip9Deployment = Bip9Deployment {
+    name: "csv",
+    bit: 0,
+    activation: ActivationThreshold::Time {
+        start_time: 1456790400, // 2016-03-01 00:00 UTC
+        timeout: 1493596800,    // 2017-05-01 00:00 UTC
     },
-    Bip9Deployment {
-        name: "segwit",
-        bit: 1,
-        activation: ActivationThreshold::Time {
-            start_time: 1462060800, // 2016-05-01 00:00 UTC
-            timeout: 1493596800,    // 2017-05-01 00:00 UTC
-        },
-        period: None,
-        threshold: None,
-        activation_height: 834_624,
+    period: None,
+    threshold: Some(1512), // 75%
+};
+
+/// SegWit on testnet3 — earlier start, relaxed 75% threshold.
+///
+/// - Bit 1, 75% threshold (1512/2016)
+/// - Active from block 834 624.
+pub const TESTNET3_SEGWIT: Bip9Deployment = Bip9Deployment {
+    name: "segwit",
+    bit: 1,
+    activation: ActivationThreshold::Time {
+        start_time: 1462060800, // 2016-05-01 00:00 UTC
+        timeout: 1493596800,    // 2017-05-01 00:00 UTC
     },
-];
+    period: None,
+    threshold: Some(1512), // 75%
+};
+
+// Note: BIP 91 (segsignal) was never deployed on testnet3 — SegWit was
+// already active there, so the orphan-non-signaling rule had nothing to do.
+
+/// Taproot on testnet3 — time-based Speedy Trial, no activation delay.
+///
+/// - Bit 2, 90% threshold (1815/2016)
+/// - No `min_activation_height` gate (immediate activation after lock-in).
+pub const TESTNET3_TAPROOT: Bip9Deployment = Bip9Deployment {
+    name: "taproot",
+    bit: 2,
+    activation: ActivationThreshold::Time {
+        start_time: 1619222400, // 2021-04-24 00:00 UTC
+        timeout: 1628640000,    // 2021-08-11 00:00 UTC
+    },
+    period: None,
+    threshold: Some(1815), // 90%
+};
+
+/// All known testnet3 BIP 9 deployments (no segsignal).
+pub const TESTNET3_DEPLOYMENTS: &[Bip9Deployment] =
+    &[TESTNET3_CSV, TESTNET3_SEGWIT, TESTNET3_TAPROOT];
+
+/// TESTDUMMY on regtest — a no-op deployment used by Core's functional tests
+/// to exercise the BIP 9 state machine without activating real consensus rules.
+///
+/// Defaults to `NEVER_ACTIVE` (start=0, timeout=0). Core's `-vbparams` flag
+/// overrides start/timeout/threshold/period at runtime.
+pub const REGTEST_TESTDUMMY: Bip9Deployment = Bip9Deployment {
+    name: "testdummy",
+    bit: 28,
+    activation: ActivationThreshold::Time {
+        start_time: 0,
+        timeout: 0, // never active by default
+    },
+    period: None,
+    threshold: None,
+};
+
+/// Regtest BIP 9 deployments. Only `testdummy` by default; runtime injection
+/// via `-vbparams` can extend this in the future.
+pub const REGTEST_DEPLOYMENTS: &[Bip9Deployment] = &[REGTEST_TESTDUMMY];
