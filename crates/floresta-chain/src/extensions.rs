@@ -124,6 +124,21 @@ pub enum ThresholdState {
     Failed,
 }
 
+/// How a deployment's start and timeout are measured.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ActivationThreshold {
+    /// Classic BIP 9: start and timeout are compared against median-time-past.
+    Time { start_time: u32, timeout: u32 },
+
+    /// Speedy Trial (BIP 9 variant): start and timeout are block heights,
+    /// with an optional minimum activation height gate after lock-in.
+    Height {
+        start_height: u32,
+        timeout_height: u32,
+        min_activation_height: u32,
+    },
+}
+
 /// Defines a BIP 9 soft-fork deployment.
 pub struct Bip9Deployment {
     /// Human-readable name for the deployment (e.g. "csv", "segwit", "taproot").
@@ -132,11 +147,16 @@ pub struct Bip9Deployment {
     /// The version bit used for signaling (0..=28).
     pub bit: u8,
 
-    /// The MTP value at which signaling begins (Unix timestamp).
-    pub start_time: u32,
+    /// How this deployment's start/timeout are measured.
+    pub activation: ActivationThreshold,
 
-    /// The MTP value at which the deployment times out (Unix timestamp).
-    pub timeout: u32,
+    /// Signaling window size. If `None`, uses the network default
+    /// (`params.miner_confirmation_window`, typically 2016).
+    pub period: Option<u32>,
+
+    /// Number of signaling blocks required in a window. If `None`, uses the
+    /// network default (`params.rule_change_activation_threshold`).
+    pub threshold: Option<u32>,
 }
 
 /// Extension trait for BIP 9 version bits soft-fork detection on block headers.
@@ -257,8 +277,12 @@ impl Bip9Ext for Header {
         chain: &impl BlockchainInterface,
     ) -> Result<ThresholdState, HeaderExtError> {
         let params = chain.get_params();
-        let window = params.miner_confirmation_window;
-        let threshold = params.rule_change_activation_threshold;
+        let window = deployment
+            .period
+            .unwrap_or(params.miner_confirmation_window);
+        let threshold = deployment
+            .threshold
+            .unwrap_or(params.rule_change_activation_threshold);
 
         let height = self.get_height(chain)?;
 
@@ -273,45 +297,59 @@ impl Bip9Ext for Header {
         // Walk forward from Defined, transitioning at each boundary.
         let mut state = ThresholdState::Defined;
 
-        for boundary_height in (window..=period_start).step_by(window as usize) {
-            // MTP of the last block in the previous period.
-            let prev_hash = chain
-                .get_block_hash(boundary_height - 1)
-                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
-            let prev_header = chain
-                .get_block_header(&prev_hash)
-                .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
-            let mtp = prev_header.calculate_median_time_past(chain)?;
+        for period_boundary in (window..=period_start).step_by(window as usize) {
+            // Resolve the activation metric used for start/timeout checks.
+            // For time-based deployments this is MTP; for height-based it is
+            // the period boundary height itself.
+            let (activation_metric, start, timeout) = match deployment.activation {
+                ActivationThreshold::Time {
+                    start_time,
+                    timeout,
+                } => {
+                    let prev_hash = chain
+                        .get_block_hash(period_boundary - 1)
+                        .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+                    let prev_header = chain
+                        .get_block_header(&prev_hash)
+                        .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
+                    let mtp = prev_header.calculate_median_time_past(chain)?;
+                    (mtp, start_time, timeout)
+                }
+                ActivationThreshold::Height {
+                    start_height,
+                    timeout_height,
+                    ..
+                } => (period_boundary, start_height, timeout_height),
+            };
 
             state = match state {
-                ThresholdState::Defined => match mtp >= deployment.timeout {
-                    true => ThresholdState::Failed,
-                    false if mtp >= deployment.start_time => ThresholdState::Started,
-                    false => ThresholdState::Defined,
-                },
+                ThresholdState::Defined => {
+                    if activation_metric >= timeout {
+                        ThresholdState::Failed
+                    } else if activation_metric >= start {
+                        ThresholdState::Started
+                    } else {
+                        ThresholdState::Defined
+                    }
+                }
                 ThresholdState::Started => {
-                    if mtp >= deployment.timeout {
+                    if activation_metric >= timeout {
                         ThresholdState::Failed
                     } else {
                         // Count signaling blocks in the previous period.
-                        let count_start = boundary_height - window;
-
+                        let count_start = period_boundary - window;
                         let mut count = 0u32;
-
-                        for block_h in count_start..boundary_height {
+                        for block_h in count_start..period_boundary {
                             let hash = chain
                                 .get_block_hash(block_h)
                                 .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
-
                             let hdr = chain
                                 .get_block_header(&hash)
                                 .map_err(|e| HeaderExtError::Chain(Box::new(e)))?;
-
                             if hdr.is_signaling(deployment.bit) {
                                 count += 1;
                             }
                         }
-
                         if count >= threshold {
                             ThresholdState::LockedIn
                         } else {
@@ -319,7 +357,22 @@ impl Bip9Ext for Header {
                         }
                     }
                 }
-                ThresholdState::LockedIn => ThresholdState::Active,
+                ThresholdState::LockedIn => {
+                    // For Speedy Trial, activation is gated on min_activation_height.
+                    if let ActivationThreshold::Height {
+                        min_activation_height,
+                        ..
+                    } = deployment.activation
+                    {
+                        if period_boundary < min_activation_height {
+                            ThresholdState::LockedIn
+                        } else {
+                            ThresholdState::Active
+                        }
+                    } else {
+                        ThresholdState::Active
+                    }
+                }
                 ThresholdState::Active => ThresholdState::Active,
                 ThresholdState::Failed => ThresholdState::Failed,
             };
@@ -832,8 +885,12 @@ mod tests {
         Bip9Deployment {
             name: "testdeploy",
             bit,
-            start_time,
-            timeout,
+            activation: ActivationThreshold::Time {
+                start_time,
+                timeout,
+            },
+            period: None,
+            threshold: None,
         }
     }
 
