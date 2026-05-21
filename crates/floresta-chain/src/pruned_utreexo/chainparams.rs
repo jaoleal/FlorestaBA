@@ -85,6 +85,9 @@ pub struct ChainParams {
 
     /// Whether we should enforce BIP-094 "Testnet 4" rules
     pub enforce_bip94: bool,
+
+    /// Known BIP 9 version-bits deployments for this network.
+    pub deployments: &'static [Bip9Deployment],
 }
 
 /// A dns seed is a authoritative DNS server that returns the IP addresses of nodes that are
@@ -343,6 +346,7 @@ impl From<Network> for ChainParams {
                 csv_activation_height: 419_328,
                 exceptions,
                 enforce_bip94: false,
+                deployments: MAINNET_DEPLOYMENTS,
             },
             Network::Testnet => ChainParams {
                 params: Params::new(network),
@@ -355,6 +359,7 @@ impl From<Network> for ChainParams {
                 csv_activation_height: 770_112,
                 exceptions,
                 enforce_bip94: false,
+                deployments: &[],
             },
             Network::Testnet4 => ChainParams {
                 params: Params::new(network),
@@ -367,6 +372,7 @@ impl From<Network> for ChainParams {
                 csv_activation_height: 1,
                 exceptions,
                 enforce_bip94: true,
+                deployments: &[],
             },
             Network::Signet => ChainParams {
                 params: Params::new(network),
@@ -379,6 +385,7 @@ impl From<Network> for ChainParams {
                 segwit_activation_height: 1,
                 exceptions,
                 enforce_bip94: false,
+                deployments: &[],
             },
             Network::Regtest => ChainParams {
                 params: Params::new(network),
@@ -391,6 +398,7 @@ impl From<Network> for ChainParams {
                 segwit_activation_height: 0,
                 exceptions,
                 enforce_bip94: false,
+                deployments: &[],
             },
         }
     }

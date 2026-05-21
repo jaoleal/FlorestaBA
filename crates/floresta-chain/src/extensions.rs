@@ -140,6 +140,7 @@ pub enum ActivationThreshold {
 }
 
 /// Defines a BIP 9 soft-fork deployment.
+#[derive(Clone, Debug)]
 pub struct Bip9Deployment {
     /// Human-readable name for the deployment (e.g. "csv", "segwit", "taproot").
     pub name: &'static str,
