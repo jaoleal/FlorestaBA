@@ -70,12 +70,6 @@ pub struct ChainParams {
     /// We wait this many blocks before a coinbase output can be spent
     pub coinbase_maturity: u32,
 
-    /// The height at which segwit is activated
-    pub segwit_activation_height: u32,
-
-    /// The height at which csv(CHECK_SEQUENCE_VERIFY) is activated
-    pub csv_activation_height: u32,
-
     /// A list of exceptions to the rules, where the key is the block hash and the value is the
     /// verification flags
     pub exceptions: HashMap<BlockHash, c_uint>,
@@ -255,6 +249,16 @@ impl ChainParams {
         }
     }
 
+    /// Returns the activation height for the deployment with the given `name`,
+    /// or `0` if no matching deployment is found (i.e. the feature is treated as
+    /// active since genesis).
+    pub fn deployment_activation_height(&self, name: &str) -> u32 {
+        self.deployments
+            .iter()
+            .find(|d| d.name == name)
+            .map_or(0, |d| d.activation_height)
+    }
+
     #[cfg(feature = "bitcoinkernel")]
     /// Returns the validation flags for a given block hash and height
     pub fn get_validation_flags(&self, height: u32, hash: BlockHash) -> c_uint {
@@ -281,10 +285,10 @@ impl ChainParams {
         if height >= self.params.bip66_height {
             flags |= bitcoinkernel::VERIFY_DERSIG;
         }
-        if height >= self.csv_activation_height {
+        if height >= self.deployment_activation_height("csv") {
             flags |= bitcoinkernel::VERIFY_CHECKSEQUENCEVERIFY;
         }
-        if height >= self.segwit_activation_height {
+        if height >= self.deployment_activation_height("segwit") {
             flags |= bitcoinkernel::VERIFY_NULLDUMMY;
         }
 
@@ -342,8 +346,6 @@ impl From<Network> for ChainParams {
                 pow_target_timespan: 14 * 24 * 60 * 60, // two weeks
                 subsidy_halving_interval: SubsidyHalvingInterval::Bitcoin,
                 coinbase_maturity: 100,
-                segwit_activation_height: 481_824,
-                csv_activation_height: 419_328,
                 exceptions,
                 enforce_bip94: false,
                 deployments: MAINNET_DEPLOYMENTS,
@@ -355,11 +357,9 @@ impl From<Network> for ChainParams {
                 pow_target_timespan: 14 * 24 * 60 * 60, // two weeks
                 subsidy_halving_interval: SubsidyHalvingInterval::Bitcoin,
                 coinbase_maturity: 100,
-                segwit_activation_height: 834_624,
-                csv_activation_height: 770_112,
                 exceptions,
                 enforce_bip94: false,
-                deployments: &[],
+                deployments: TESTNET_DEPLOYMENTS,
             },
             Network::Testnet4 => ChainParams {
                 params: Params::new(network),
@@ -368,8 +368,6 @@ impl From<Network> for ChainParams {
                 pow_target_timespan: 14 * 24 * 60 * 60,
                 subsidy_halving_interval: SubsidyHalvingInterval::Bitcoin,
                 coinbase_maturity: 100,
-                segwit_activation_height: 1,
-                csv_activation_height: 1,
                 exceptions,
                 enforce_bip94: true,
                 deployments: &[],
@@ -381,8 +379,6 @@ impl From<Network> for ChainParams {
                 pow_target_timespan: 14 * 24 * 60 * 60, // two weeks
                 subsidy_halving_interval: SubsidyHalvingInterval::Bitcoin,
                 coinbase_maturity: 100,
-                csv_activation_height: 1,
-                segwit_activation_height: 1,
                 exceptions,
                 enforce_bip94: false,
                 deployments: &[],
@@ -394,8 +390,6 @@ impl From<Network> for ChainParams {
                 pow_target_timespan: 14 * 24 * 60 * 60, // two weeks
                 subsidy_halving_interval: SubsidyHalvingInterval::Regtest,
                 coinbase_maturity: 100,
-                csv_activation_height: 0,
-                segwit_activation_height: 0,
                 exceptions,
                 enforce_bip94: false,
                 deployments: &[],
@@ -470,6 +464,7 @@ pub const CSV: Bip9Deployment = Bip9Deployment {
     },
     period: None,    // network default (2016)
     threshold: None, // network default (1916, 95%)
+    activation_height: 419_328,
 };
 
 /// BIPs 141/143/144/147 — Segregated Witness.
@@ -491,6 +486,7 @@ pub const SEGWIT: Bip9Deployment = Bip9Deployment {
     },
     period: None,
     threshold: None,
+    activation_height: 481_824,
 };
 
 /// BIP 91 — Segsignal (reduced-threshold SegWit signaling).
@@ -509,6 +505,7 @@ pub const SEGSIGNAL: Bip9Deployment = Bip9Deployment {
     },
     period: Some(336),
     threshold: Some(269),
+    activation_height: 477_456,
 };
 
 /// BIPs 340/341/342 — Taproot (Speedy Trial activation).
@@ -530,7 +527,34 @@ pub const TAPROOT: Bip9Deployment = Bip9Deployment {
     },
     period: None,
     threshold: Some(1815),
+    activation_height: 709_632,
 };
 
 /// All known mainnet BIP 9 deployments, in chronological activation order.
 pub const MAINNET_DEPLOYMENTS: &[Bip9Deployment] = &[CSV, SEGWIT, SEGSIGNAL, TAPROOT];
+
+/// Known testnet3 BIP 9 deployments with their historical activation heights.
+pub const TESTNET_DEPLOYMENTS: &[Bip9Deployment] = &[
+    Bip9Deployment {
+        name: "csv",
+        bit: 0,
+        activation: ActivationThreshold::Time {
+            start_time: 1456790400, // 2016-03-01 00:00 UTC
+            timeout: 1493596800,    // 2017-05-01 00:00 UTC
+        },
+        period: None,
+        threshold: None,
+        activation_height: 770_112,
+    },
+    Bip9Deployment {
+        name: "segwit",
+        bit: 1,
+        activation: ActivationThreshold::Time {
+            start_time: 1462060800, // 2016-05-01 00:00 UTC
+            timeout: 1493596800,    // 2017-05-01 00:00 UTC
+        },
+        period: None,
+        threshold: None,
+        activation_height: 834_624,
+    },
+];

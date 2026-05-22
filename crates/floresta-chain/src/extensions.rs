@@ -158,6 +158,10 @@ pub struct Bip9Deployment {
     /// Number of signaling blocks required in a window. If `None`, uses the
     /// network default (`params.rule_change_activation_threshold`).
     pub threshold: Option<u32>,
+
+    /// The block height at which this deployment became active on the network.
+    /// For deployments that are active since genesis, this is `0`.
+    pub activation_height: u32,
 }
 
 /// Extension trait for BIP 9 version bits soft-fork detection on block headers.
@@ -892,6 +896,7 @@ mod tests {
             },
             period: None,
             threshold: None,
+            activation_height: 0,
         }
     }
 
