@@ -76,6 +76,9 @@ pub enum BlockchainError {
 
     /// The utreexo accumulator for a fully-validated block could not be found in the database.
     UnknownUtreexoAcc,
+
+    /// Cannot reconsider a block that failed consensus validation.
+    CannotReconsiderConsensusInvalid,
 }
 
 impl_error_from!(BlockchainError, ChainWorkOverflow, OperationOverflow);
@@ -109,6 +112,10 @@ impl Display for BlockchainError {
             Self::UnknownUtreexoAcc => write!(
                 f,
                 "The utreexo accumulator for a fully-validated block could not be found"
+            ),
+            Self::CannotReconsiderConsensusInvalid => write!(
+                f,
+                "Cannot reconsider a block that failed consensus validation"
             ),
         }
     }
