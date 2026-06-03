@@ -70,6 +70,12 @@ pub enum BlockchainError {
 
     /// A [`ChainState`](crate::ChainState) operation overflowed.
     OperationOverflow(ChainWorkOverflow),
+
+    /// The requested operation is not valid in this context (e.g. invalidating the genesis block).
+    InvalidOperation,
+
+    /// The utreexo accumulator for a fully-validated block could not be found in the database.
+    UnknownUtreexoAcc,
 }
 
 impl_error_from!(BlockchainError, ChainWorkOverflow, OperationOverflow);
@@ -97,6 +103,13 @@ impl Display for BlockchainError {
             Self::InvalidTip(e) => write!(f, "The ChainState's tip is invalid: {e}"),
             Self::BadValidationIndex => write!(f, "The ChainState's validation index is invalid"),
             Self::OperationOverflow(_) => write!(f, "A ChainState operation overflowed"),
+            Self::InvalidOperation => {
+                write!(f, "The requested operation is not valid in this context")
+            }
+            Self::UnknownUtreexoAcc => write!(
+                f,
+                "The utreexo accumulator for a fully-validated block could not be found"
+            ),
         }
     }
 }
