@@ -1335,6 +1335,106 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         Ok(())
     }
 
+    fn reconsider_block(&self, block: BlockHash) -> Result<(), BlockchainError> {
+        let disk_header = self.get_disk_block_header(&block)?;
+
+        // Find the invalidated ancestor. If the target itself is Invalidated,
+        // start_height is its height. If it is DescendsFromInvalid, walk
+        // backwards until we find the Invalidated root.
+        let target_height = match disk_header {
+            DiskBlockHeader::InvalidChain(_, h, InvalidReason::Invalidated)
+            | DiskBlockHeader::InvalidChain(_, h, InvalidReason::DescendsFromInvalid) => h,
+            DiskBlockHeader::InvalidChain(_, _, InvalidReason::ValidationFailed) => {
+                return Err(BlockchainError::CannotReconsiderConsensusInvalid);
+            }
+            _ => return Ok(()),
+        };
+
+        // Walk backwards to find the Invalidated ancestor (the root of the
+        // invalid chain). This is the block the user originally invalidated.
+        let mut start_height = target_height;
+        for h in (0..target_height).rev() {
+            let hash = self
+                .get_block_hash(h)
+                .or(Err(BlockchainError::BlockNotPresent))?;
+            let dh = self.get_disk_block_header(&hash)?;
+            match dh {
+                DiskBlockHeader::InvalidChain(_, _, InvalidReason::Invalidated) => {
+                    start_height = h;
+                    break;
+                }
+                DiskBlockHeader::InvalidChain(_, _, InvalidReason::DescendsFromInvalid) => {
+                    continue;
+                }
+                _ => break,
+            }
+        }
+
+        // Restore blocks from the Invalidated ancestor up to (and including)
+        // the target: FullyValid if accumulator roots exist, HeadersOnly
+        // otherwise.
+        for h in start_height..=target_height {
+            let hash = self.get_block_hash(h)?;
+            let dh = self.get_disk_block_header(&hash)?;
+            let new_header = match self.get_roots_for_block(h)? {
+                Some(_) => DiskBlockHeader::FullyValid(*dh, h),
+                None => DiskBlockHeader::HeadersOnly(*dh, h),
+            };
+            self.update_header_and_index(&new_header, hash, h)?;
+        }
+
+        // Walk forward from the target, restoring remaining DescendsFromInvalid
+        // descendants as HeadersOnly. Stop at ValidationFailed, Invalidated, or
+        // non-invalid blocks.
+        let mut last_reconsidered_height = target_height;
+        for h in (target_height + 1).. {
+            let hash = match read_lock!(self).chainstore.get_block_hash(h)? {
+                Some(hash) => hash,
+                None => break,
+            };
+            let dh = self.get_disk_block_header(&hash)?;
+            match dh {
+                DiskBlockHeader::InvalidChain(hdr, _, InvalidReason::DescendsFromInvalid) => {
+                    self.update_header_and_index(&DiskBlockHeader::HeadersOnly(hdr, h), hash, h)?;
+                    last_reconsidered_height = h;
+                }
+                _ => break,
+            }
+        }
+
+        // The reconsidered chain is an extension of the current best chain
+        // (since we're restoring blocks that were previously on the best chain
+        // before invalidation). Compare its work against the current chain and
+        // update the tip directly if it has more work.
+        let reconsidered_tip_hash = read_lock!(self)
+            .chainstore
+            .get_block_hash(last_reconsidered_height)?
+            .ok_or(BlockchainError::BlockNotPresent)?;
+        let reconsidered_tip = self.get_block_header(&reconsidered_tip_hash)?;
+
+        let current_tip = self.get_block_header(&self.get_best_block()?.1)?;
+        let current_work = self.get_branch_work(current_tip)?;
+        let reconsidered_work = self.get_fork_work(reconsidered_tip, current_tip.block_hash())?;
+
+        if reconsidered_work > current_work {
+            let validation_index = self.get_last_valid_block(&reconsidered_tip)?;
+            let current_height = self.get_height()?;
+            let acc = self
+                .get_roots_for_block(current_height)?
+                .unwrap_or_default();
+
+            let mut inner = self.inner.write();
+            inner.best_block.best_block = reconsidered_tip.block_hash();
+            inner.best_block.depth = last_reconsidered_height;
+            inner.best_block.validation_index = validation_index;
+            inner.acc = acc;
+        }
+
+        self.flush()?;
+
+        Ok(())
+    }
+
     fn toggle_ibd(&self, is_ibd: bool) {
         let mut inner = write_lock!(self);
         inner.ibd = is_ibd;
