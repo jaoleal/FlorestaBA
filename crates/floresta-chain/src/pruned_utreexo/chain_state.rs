@@ -1222,12 +1222,13 @@ impl<PersistedState: ChainStore> BlockchainInterface for ChainState<PersistedSta
         let inner = self.inner.read();
         let validation = inner.best_block.validation_index;
         let header = self.get_disk_block_header(&validation)?;
-        // The last validated disk header can only be FullyValid
-        if let DiskBlockHeader::FullyValid(_, height) = header {
-            return Ok(height);
+        // The validation index should point to a fully validated or assumed-valid block
+        match header {
+            DiskBlockHeader::FullyValid(_, height) | DiskBlockHeader::AssumedValid(_, height) => {
+                Ok(height)
+            }
+            _ => Err(BlockchainError::BadValidationIndex),
         }
-
-        Err(BlockchainError::BadValidationIndex)
     }
 
     fn is_coinbase_mature(&self, height: u32, block: BlockHash) -> Result<bool, Self::Error> {
