@@ -427,7 +427,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error> {
+        fn get_chain_tips(&self) -> Result<Vec<crate::ChainTipInfo>, Self::Error> {
             unimplemented!()
         }
 

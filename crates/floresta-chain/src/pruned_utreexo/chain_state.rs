@@ -56,6 +56,8 @@ use super::UpdatableChainstate;
 use super::chain_state_builder::BlockchainBuilderError;
 use super::chain_state_builder::ChainStateBuilder;
 use super::chainparams::ChainParams;
+use super::chainstore::ChainTipInfo;
+use super::chainstore::ChainTipStatus;
 use super::chainstore::DiskBlockHeader;
 use super::consensus::Consensus;
 use super::error::BlockValidationErrors;
@@ -1118,12 +1120,23 @@ impl<PersistedState: ChainStore> BlockchainInterface for ChainState<PersistedSta
         Consensus::update_acc(&acc, block, height, proof, del_hashes)
     }
 
-    fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error> {
+    fn get_chain_tips(&self) -> Result<Vec<ChainTipInfo>, Self::Error> {
         let inner = read_lock!(self);
-        let mut tips = Vec::new();
+        let best = inner.best_block.best_block;
 
-        tips.push(inner.best_block.best_block);
-        tips.extend(inner.best_block.alternative_tips.iter());
+        let mut tips = vec![ChainTipInfo {
+            hash: best,
+            status: ChainTipStatus::Active,
+        }];
+
+        for &hash in &inner.best_block.alternative_tips {
+            let status = match inner.chainstore.get_header(&hash)? {
+                Some(DiskBlockHeader::InvalidChain(_, _)) => ChainTipStatus::Invalid,
+                Some(DiskBlockHeader::HeadersOnly(_, _)) => ChainTipStatus::HeadersOnly,
+                _ => ChainTipStatus::ValidFork,
+            };
+            tips.push(ChainTipInfo { hash, status });
+        }
 
         Ok(tips)
     }

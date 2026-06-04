@@ -397,7 +397,7 @@ impl BlockchainInterface for PartialChainState {
         unimplemented!("PartialChainState::get_block_header")
     }
 
-    fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error> {
+    fn get_chain_tips(&self) -> Result<Vec<super::chainstore::ChainTipInfo>, Self::Error> {
         unimplemented!("PartialChainState::get_chain_tips")
     }
 
