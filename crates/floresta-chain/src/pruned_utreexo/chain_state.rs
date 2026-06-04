@@ -582,6 +582,46 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         Ok(())
     }
 
+    /// Re-evaluates chain selection after a block has been reconsidered.
+    ///
+    /// Compares the work of the candidate branch against the current best chain.
+    /// If the candidate has more work, triggers a full reorg. Otherwise, marks the
+    /// candidate branch as an in-fork alternative tip.
+    fn activate_best_chain(&self, candidate_tip: BlockHeader) -> Result<(), BlockchainError> {
+        let current_tip = self.get_block_header(&self.get_best_block()?.1)?;
+        let candidate_height = self.get_chain_depth(&candidate_tip)?;
+        let current_height = self.get_height()?;
+
+        let current_work = self.get_branch_work(current_tip)?;
+        let candidate_work = if candidate_height > current_height {
+            self.get_branch_work(candidate_tip)?
+        } else {
+            let fork_point = self.find_fork_point(&candidate_tip)?;
+            self.get_fork_work(candidate_tip, fork_point.block_hash())?
+        };
+
+        if candidate_work > current_work {
+            self.reorg(candidate_tip)?;
+        } else {
+            self.push_alt_tip(&candidate_tip)?;
+            // Mark candidate branch as InFork up to the fork point
+            let mut header = candidate_tip;
+            let mut h = candidate_height;
+            while !self.is_genesis(&header) {
+                let disk = self.get_disk_block_header(&header.block_hash())?;
+                match disk {
+                    DiskBlockHeader::HeadersOnly(_, _) => {
+                        self.update_header(&DiskBlockHeader::InFork(header, h))?;
+                    }
+                    _ => break,
+                }
+                header = *self.get_ancestor(&header)?;
+                h -= 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Stores a new tip for a branch that is not the best one
     fn push_alt_tip(&self, branch_tip: &BlockHeader) -> Result<(), BlockchainError> {
         let ancestor = self.get_ancestor(branch_tip);
@@ -1385,6 +1425,62 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
                 .block_hash(),
             height - 1,
         );
+        Ok(())
+    }
+
+    fn reconsider_block(&self, block: BlockHash) -> Result<(), BlockchainError> {
+        let disk_header = self.get_disk_block_header(&block)?;
+
+        let height = match disk_header {
+            DiskBlockHeader::InvalidChain(_, h, InvalidReason::UserInvalidated) => h,
+            DiskBlockHeader::InvalidChain(_, _, InvalidReason::ValidationFailed) => {
+                return Err(BlockchainError::BlockValidation(
+                    BlockValidationErrors::BlockExtendsAnOrphanChain,
+                ));
+            }
+            // DescendsFromInvalid should not be reconsidered directly — only the
+            // root UserInvalidated block should be reconsidered, which will restore
+            // descendants automatically.
+            DiskBlockHeader::InvalidChain(_, _, InvalidReason::DescendsFromInvalid) => {
+                return Err(BlockchainError::BlockValidation(
+                    BlockValidationErrors::BlockExtendsAnOrphanChain,
+                ));
+            }
+            // Block is not invalid, nothing to do
+            _ => return Ok(()),
+        };
+
+        // Restore the target block to HeadersOnly
+        self.update_header_and_index(
+            &DiskBlockHeader::HeadersOnly(*disk_header, height),
+            block,
+            height,
+        )?;
+
+        // Walk forward, restoring DescendsFromInvalid descendants
+        let mut last_reconsidered_height = height;
+        for h in (height + 1).. {
+            let hash = match read_lock!(self).chainstore.get_block_hash(h)? {
+                Some(hash) => hash,
+                None => break,
+            };
+            let dh = self.get_disk_block_header(&hash)?;
+            match dh {
+                DiskBlockHeader::InvalidChain(hdr, _, InvalidReason::DescendsFromInvalid) => {
+                    self.update_header_and_index(&DiskBlockHeader::HeadersOnly(hdr, h), hash, h)?;
+                    last_reconsidered_height = h;
+                }
+                _ => break,
+            }
+        }
+
+        // Delegate chain selection to activate_best_chain
+        let reconsidered_tip_hash = read_lock!(self)
+            .chainstore
+            .get_block_hash(last_reconsidered_height)?
+            .ok_or(BlockchainError::BlockNotPresent)?;
+        let reconsidered_tip = self.get_block_header(&reconsidered_tip_hash)?;
+        self.activate_best_chain(reconsidered_tip)?;
         Ok(())
     }
 
