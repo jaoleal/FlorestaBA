@@ -400,6 +400,10 @@ async fn handle_json_rpc_request(
             .await
             .map(|v| serde_json::to_value(v).expect(SERIALIZATION_EXPECT_MSG)),
 
+        "getchaintips" => state
+            .get_chain_tips()
+            .map(|v| serde_json::to_value(v).expect(SERIALIZATION_EXPECT_MSG)),
+
         "gettxout" => {
             let txid = get_at(&params, 0, "txid")?;
             let vout = get_at(&params, 1, "vout")?;

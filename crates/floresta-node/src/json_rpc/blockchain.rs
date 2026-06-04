@@ -337,7 +337,74 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
     // getblockstats
     // getchainstates
+
     // getchaintips
+    pub(super) fn get_chain_tips(&self) -> Result<Vec<super::res::ChainTip>, JsonRpcError> {
+        use super::res::ChainTip;
+        use super::res::ChainTipStatus;
+
+        let tips = self
+            .chain
+            .get_chain_tips()
+            .map_err(|_| JsonRpcError::Chain)?;
+
+        let (best_height, _) = self
+            .chain
+            .get_best_block()
+            .map_err(|_| JsonRpcError::Chain)?;
+
+        let mut result = Vec::with_capacity(tips.len());
+
+        for tip in tips {
+            let status = match tip.status {
+                floresta_chain::ChainTipStatus::Active => ChainTipStatus::Active,
+                floresta_chain::ChainTipStatus::ValidFork => ChainTipStatus::ValidFork,
+                floresta_chain::ChainTipStatus::HeadersOnly => ChainTipStatus::HeadersOnly,
+                floresta_chain::ChainTipStatus::Invalid => ChainTipStatus::Invalid,
+            };
+
+            if matches!(tip.status, floresta_chain::ChainTipStatus::Active) {
+                result.push(ChainTip {
+                    height: best_height,
+                    hash: tip.hash.to_string(),
+                    branchlen: 0,
+                    status,
+                });
+                continue;
+            }
+
+            let tip_height = self
+                .chain
+                .get_block_height(&tip.hash)
+                .map_err(|_| JsonRpcError::Chain)?
+                .ok_or(JsonRpcError::Chain)?;
+
+            // For invalid tips, get_fork_point may fail because ancestors
+            // are also marked invalid. Fall back to using the active chain
+            // height as the fork point estimate.
+            let branchlen = match self.chain.get_fork_point(tip.hash) {
+                Ok(fork_point) => {
+                    let fork_height = self
+                        .chain
+                        .get_block_height(&fork_point)
+                        .map_err(|_| JsonRpcError::Chain)?
+                        .ok_or(JsonRpcError::Chain)?;
+                    tip_height.saturating_sub(fork_height)
+                }
+                Err(_) => tip_height.saturating_sub(best_height),
+            };
+
+            result.push(ChainTip {
+                height: tip_height,
+                hash: tip.hash.to_string(),
+                branchlen,
+                status,
+            });
+        }
+
+        Ok(result)
+    }
+
     // getchaintxstats
 
     // getdeploymentinfo
