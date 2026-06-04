@@ -94,7 +94,7 @@ pub enum DiskBlockHeader {
     InFork(BlockHeader, u32),
 
     /// Represents an invalid chain block header.
-    InvalidChain(BlockHeader),
+    InvalidChain(BlockHeader, u32),
 }
 
 impl DiskBlockHeader {
@@ -110,14 +110,13 @@ impl DiskBlockHeader {
             DiskBlockHeader::FullyValid(_, height) => Some(*height),
             DiskBlockHeader::HeadersOnly(_, height) => Some(*height),
             DiskBlockHeader::AssumedValid(_, height) => Some(*height),
-            // These two cases don't store the block height
+            DiskBlockHeader::InvalidChain(_, height) => Some(*height),
             DiskBlockHeader::Orphan(_) => None,
-            DiskBlockHeader::InvalidChain(_) => None,
         }
     }
 
     /// Gets the block height or returns `BlockchainError::OrphanOrInvalidBlock` if the block is
-    /// orphaned or on an invalid chain (the height is not stored).
+    /// orphaned (the height is not stored).
     pub fn try_height(&self) -> Result<u32, BlockchainError> {
         self.height().ok_or(BlockchainError::OrphanOrInvalidBlock)
     }
@@ -132,7 +131,7 @@ impl Deref for DiskBlockHeader {
             DiskBlockHeader::Orphan(header) => header,
             DiskBlockHeader::HeadersOnly(header, _) => header,
             DiskBlockHeader::InFork(header, _) => header,
-            DiskBlockHeader::InvalidChain(header) => header,
+            DiskBlockHeader::InvalidChain(header, _) => header,
             DiskBlockHeader::AssumedValid(header, _) => header,
         }
     }
@@ -161,7 +160,10 @@ impl Decodable for DiskBlockHeader {
 
                 Ok(Self::InFork(header, height))
             }
-            0x04 => Ok(Self::InvalidChain(header)),
+            0x04 => {
+                let height = u32::consensus_decode(reader)?;
+                Ok(Self::InvalidChain(header, height))
+            }
             0x05 => {
                 let height = u32::consensus_decode(reader)?;
                 Ok(Self::AssumedValid(header, height))
@@ -201,9 +203,11 @@ impl Encodable for DiskBlockHeader {
                 height.consensus_encode(writer)?;
                 len += 4;
             }
-            DiskBlockHeader::InvalidChain(header) => {
+            DiskBlockHeader::InvalidChain(header, height) => {
                 0x04_u8.consensus_encode(writer)?;
                 header.consensus_encode(writer)?;
+                height.consensus_encode(writer)?;
+                len += 4;
             }
             DiskBlockHeader::AssumedValid(header, height) => {
                 0x05_u8.consensus_encode(writer)?;
@@ -342,13 +346,10 @@ mod tests {
             Err(BlockchainError::OrphanOrInvalidBlock)
         ));
 
-        // invalid chain → no height
-        let inv = DiskBlockHeader::InvalidChain(header);
-        assert_eq!(inv.height(), None);
-        assert!(matches!(
-            inv.try_height(),
-            Err(BlockchainError::OrphanOrInvalidBlock)
-        ));
+        // invalid chain → now stores height
+        let inv = DiskBlockHeader::InvalidChain(header, h);
+        assert_eq!(inv.height(), Some(h));
+        assert_eq!(inv.try_height().unwrap(), h);
     }
 
     #[test]
@@ -370,7 +371,7 @@ mod tests {
             DiskBlockHeader::HeadersOnly(header, h),
             DiskBlockHeader::InFork(header, h),
             DiskBlockHeader::Orphan(header),
-            DiskBlockHeader::InvalidChain(header),
+            DiskBlockHeader::InvalidChain(header, h),
         ];
 
         for original in all_variants {

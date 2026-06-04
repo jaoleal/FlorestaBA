@@ -41,7 +41,7 @@ enum Operation {
     SaveHeaderAssumedValid { header_idx: u8, height: u32 },
     SaveHeaderInFork { header_idx: u8, height: u32 },
     SaveHeaderOrphan { header_idx: u8 },
-    SaveHeaderInvalidChain { header_idx: u8 },
+    SaveHeaderInvalidChain { header_idx: u8, height: u32 },
     GetHeaderByHash { header_idx: u8 },
     GetBlockHash { height: u32 },
     Flush,
@@ -98,7 +98,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                     height: u32::arbitrary(u)?,
                 },
                 4 => Operation::SaveHeaderOrphan { header_idx },
-                5 => Operation::SaveHeaderInvalidChain { header_idx },
+                5 => Operation::SaveHeaderInvalidChain {
+                    header_idx,
+                    height: u32::arbitrary(u)?,
+                },
                 6 => Operation::GetHeaderByHash { header_idx },
                 7 => Operation::GetBlockHash {
                     height: u32::arbitrary(u)?,
@@ -214,9 +217,9 @@ fuzz_target!(|input: FuzzInput| {
                     hash_to_entry.insert(header.block_hash(), OracleEntry { header });
                 }
             }
-            Operation::SaveHeaderInvalidChain { header_idx } => {
+            Operation::SaveHeaderInvalidChain { header_idx, height } => {
                 let header = input.headers[header_idx as usize % input.headers.len()];
-                let variant = DiskBlockHeader::InvalidChain(header);
+                let variant = DiskBlockHeader::InvalidChain(header, height);
 
                 if store.save_header(&variant).is_ok() {
                     hash_to_entry.insert(header.block_hash(), OracleEntry { header });

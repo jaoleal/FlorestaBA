@@ -52,7 +52,7 @@ fuzz_target!(|data: &[u8]| {
             2 => DiskBlockHeader::HeadersOnly(inp.header, inp.height),
             3 => DiskBlockHeader::InFork(inp.header, inp.height),
             4 => DiskBlockHeader::Orphan(inp.header),
-            _ => DiskBlockHeader::InvalidChain(inp.header),
+            _ => DiskBlockHeader::InvalidChain(inp.header, inp.height),
         };
 
         // Encode

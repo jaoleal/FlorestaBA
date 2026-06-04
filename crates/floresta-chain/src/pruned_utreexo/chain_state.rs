@@ -406,7 +406,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
                         header.block_hash()
                     ))));
                 }
-                Some(DiskBlockHeader::InvalidChain(header)) => {
+                Some(DiskBlockHeader::InvalidChain(header, _)) => {
                     return Err(BlockchainError::InvalidTip(format(format_args!(
                         "Block {} is invalid",
                         header.block_hash()
@@ -483,7 +483,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
                     ))));
                 }
                 DiskBlockHeader::HeadersOnly(_, _) | DiskBlockHeader::InFork(_, _) => {}
-                DiskBlockHeader::InvalidChain(_) => {
+                DiskBlockHeader::InvalidChain(_, _) => {
                     return Err(BlockchainError::InvalidTip(format(format_args!(
                         "Block {} is in an invalid chain",
                         _header.block_hash()
@@ -1285,7 +1285,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         for h in height..=current_height {
             let hash = self.get_block_hash(h)?;
             let header = self.get_block_header(&hash)?;
-            let new_header = DiskBlockHeader::InvalidChain(header);
+            let new_header = DiskBlockHeader::InvalidChain(header, h);
             self.update_header(&new_header)?;
         }
         // Row back to our previous state. Note that acc doesn't actually change in this case
@@ -1338,7 +1338,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             DiskBlockHeader::Orphan(_)
             | DiskBlockHeader::AssumedValid(_, _) // this will be validated by a partial chain
             | DiskBlockHeader::InFork(_, _)
-            | DiskBlockHeader::InvalidChain(_) => return Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?,
+            | DiskBlockHeader::InvalidChain(_, _) => return Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?,
 
             DiskBlockHeader::HeadersOnly(_, height) => {
                 let validation_index = self.get_validation_index()?;
