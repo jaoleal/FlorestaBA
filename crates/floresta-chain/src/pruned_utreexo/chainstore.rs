@@ -94,7 +94,20 @@ pub enum DiskBlockHeader {
     InFork(BlockHeader, u32),
 
     /// Represents an invalid chain block header.
-    InvalidChain(BlockHeader, u32),
+    InvalidChain(BlockHeader, u32, InvalidReason),
+}
+
+/// The reason a block was marked as part of an invalid chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidReason {
+    /// The block itself failed consensus validation.
+    ValidationFailed,
+
+    /// Explicitly marked invalid by the user via `invalidateblock` RPC.
+    UserInvalidated,
+
+    /// Descends from a block that was invalidated or failed validation.
+    DescendsFromInvalid,
 }
 
 impl DiskBlockHeader {
@@ -110,7 +123,7 @@ impl DiskBlockHeader {
             DiskBlockHeader::FullyValid(_, height) => Some(*height),
             DiskBlockHeader::HeadersOnly(_, height) => Some(*height),
             DiskBlockHeader::AssumedValid(_, height) => Some(*height),
-            DiskBlockHeader::InvalidChain(_, height) => Some(*height),
+            DiskBlockHeader::InvalidChain(_, height, _) => Some(*height),
             DiskBlockHeader::Orphan(_) => None,
         }
     }
@@ -131,7 +144,7 @@ impl Deref for DiskBlockHeader {
             DiskBlockHeader::Orphan(header) => header,
             DiskBlockHeader::HeadersOnly(header, _) => header,
             DiskBlockHeader::InFork(header, _) => header,
-            DiskBlockHeader::InvalidChain(header, _) => header,
+            DiskBlockHeader::InvalidChain(header, _, _) => header,
             DiskBlockHeader::AssumedValid(header, _) => header,
         }
     }
@@ -162,7 +175,18 @@ impl Decodable for DiskBlockHeader {
             }
             0x04 => {
                 let height = u32::consensus_decode(reader)?;
-                Ok(Self::InvalidChain(header, height))
+                let reason_byte = u8::consensus_decode(reader)?;
+                let reason = match reason_byte {
+                    0 => InvalidReason::ValidationFailed,
+                    1 => InvalidReason::UserInvalidated,
+                    2 => InvalidReason::DescendsFromInvalid,
+                    _ => {
+                        return Err(encode::Error::ParseFailed(
+                            "DiskBlockHeader: invalid InvalidReason tag",
+                        ));
+                    }
+                };
+                Ok(Self::InvalidChain(header, height, reason))
             }
             0x05 => {
                 let height = u32::consensus_decode(reader)?;
@@ -203,11 +227,17 @@ impl Encodable for DiskBlockHeader {
                 height.consensus_encode(writer)?;
                 len += 4;
             }
-            DiskBlockHeader::InvalidChain(header, height) => {
+            DiskBlockHeader::InvalidChain(header, height, reason) => {
                 0x04_u8.consensus_encode(writer)?;
                 header.consensus_encode(writer)?;
                 height.consensus_encode(writer)?;
-                len += 4;
+                let reason_byte: u8 = match reason {
+                    InvalidReason::ValidationFailed => 0,
+                    InvalidReason::UserInvalidated => 1,
+                    InvalidReason::DescendsFromInvalid => 2,
+                };
+                reason_byte.consensus_encode(writer)?;
+                len += 4 + 1;
             }
             DiskBlockHeader::AssumedValid(header, height) => {
                 0x05_u8.consensus_encode(writer)?;
@@ -373,7 +403,7 @@ mod tests {
         ));
 
         // invalid chain → now stores height
-        let inv = DiskBlockHeader::InvalidChain(header, h);
+        let inv = DiskBlockHeader::InvalidChain(header, h, InvalidReason::UserInvalidated);
         assert_eq!(inv.height(), Some(h));
         assert_eq!(inv.try_height().unwrap(), h);
     }
@@ -397,7 +427,9 @@ mod tests {
             DiskBlockHeader::HeadersOnly(header, h),
             DiskBlockHeader::InFork(header, h),
             DiskBlockHeader::Orphan(header),
-            DiskBlockHeader::InvalidChain(header, h),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::ValidationFailed),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::UserInvalidated),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::DescendsFromInvalid),
         ];
 
         for original in all_variants {
