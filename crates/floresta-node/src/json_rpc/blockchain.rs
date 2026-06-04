@@ -425,6 +425,13 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             .map_err(|_| JsonRpcError::Chain)
     }
 
+    // reconsiderblock
+    pub(super) fn reconsider_block(&self, hash: BlockHash) -> Result<(), JsonRpcError> {
+        self.chain
+            .reconsider_block(hash)
+            .map_err(|_| JsonRpcError::BlockNotFound)
+    }
+
     // getdeploymentinfo
     pub(super) fn get_deployment_info(
         &self,

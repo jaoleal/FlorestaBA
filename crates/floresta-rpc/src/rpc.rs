@@ -170,6 +170,10 @@ pub trait FlorestaRPC {
     /// Decodes the given hex data as a block header and submits it as a candidate chain tip.
     #[doc = include_str!("../../../doc/rpc/submitheader.md")]
     fn submit_header(&self, hexdata: String) -> Result<()>;
+
+    /// Removes the invalid state from a previously invalidated block.
+    #[doc = include_str!("../../../doc/rpc/reconsiderblock.md")]
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()>;
 }
 
 /// Since the workflow for jsonrpc is the same for all methods, we can implement a trait
@@ -405,5 +409,9 @@ impl<T: JsonRPCClient> FlorestaRPC for T {
 
     fn submit_header(&self, hexdata: String) -> Result<()> {
         self.call("submitheader", &[Value::String(hexdata)])
+    }
+
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()> {
+        self.call("reconsiderblock", &[Value::String(blockhash.to_string())])
     }
 }

@@ -416,6 +416,12 @@ async fn handle_json_rpc_request(
             Ok(Value::Null)
         }
 
+        "reconsiderblock" => {
+            let hash: BlockHash = get_at(&params, 0, "blockhash")?;
+            state.reconsider_block(hash)?;
+            Ok(Value::Null)
+        }
+
         "gettxout" => {
             let txid = get_at(&params, 0, "txid")?;
             let vout = get_at(&params, 1, "vout")?;
