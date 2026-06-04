@@ -52,3 +52,9 @@ class FlorestaRPC(BaseRPC):
         Submits a raw block header as a candidate chain tip.
         """
         return self.perform_request("submitheader", params=[hexdata])
+
+    def reconsider_block(self, blockhash: str):
+        """
+        Removes the invalid state from a previously invalidated block.
+        """
+        return self.perform_request("reconsiderblock", params=[blockhash])
