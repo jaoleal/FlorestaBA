@@ -58,6 +58,7 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
     Ok(match cmd.methods.clone() {
         // Handle each possible RPC method and serialize the result to a pretty JSON string
         Methods::GetBlockchainInfo => serde_json::to_string_pretty(&client.get_blockchain_info()?)?,
+        Methods::GetChainTips => serde_json::to_string_pretty(&client.get_chain_tips()?)?,
         Methods::GetBlockHash { height } => {
             serde_json::to_string_pretty(&client.get_block_hash(height)?)?
         }
@@ -138,6 +139,15 @@ fn do_request(cmd: &Cli, client: Client) -> anyhow::Result<String> {
             serde_json::to_string_pretty(&client.get_deployment_info(blockhash)?)?
         }
         Methods::GetAddrManInfo => serde_json::to_string_pretty(&client.get_addrman_info()?)?,
+        Methods::InvalidateBlock { blockhash } => {
+            serde_json::to_string_pretty(&client.invalidate_block(blockhash)?)?
+        }
+        Methods::SubmitHeader { hexdata } => {
+            serde_json::to_string_pretty(&client.submit_header(hexdata)?)?
+        }
+        Methods::ReconsiderBlock { blockhash } => {
+            serde_json::to_string_pretty(&client.reconsider_block(blockhash)?)?
+        }
     })
 }
 
@@ -179,6 +189,15 @@ pub enum Methods {
         disable_help_subcommand = true
     )]
     GetBlockchainInfo,
+
+    #[doc = include_str!("../../../doc/rpc/getchaintips.md")]
+    #[command(
+        name = "getchaintips",
+        about = "Return information about all known tips in the block tree.",
+        long_about = Some(include_str!("../../../doc/rpc/getchaintips.md")),
+        disable_help_subcommand = true
+    )]
+    GetChainTips,
 
     #[doc = include_str!("../../../doc/rpc/getblockhash.md")]
     #[command(
@@ -456,4 +475,30 @@ pub enum Methods {
         disable_help_subcommand = true
     )]
     GetAddrManInfo,
+
+    #[doc = include_str!("../../../doc/rpc/invalidateblock.md")]
+    #[command(
+        name = "invalidateblock",
+        about = "Permanently marks a block as invalid, as if it violated a consensus rule",
+        long_about = Some(include_str!("../../../doc/rpc/invalidateblock.md")),
+        disable_help_subcommand = true
+    )]
+    InvalidateBlock { blockhash: BlockHash },
+
+    #[doc = include_str!("../../../doc/rpc/submitheader.md")]
+    #[command(
+        name = "submitheader",
+        about = "Decodes the given hex data as a block header and submits it as a candidate chain tip",
+        long_about = Some(include_str!("../../../doc/rpc/submitheader.md")),
+        disable_help_subcommand = true
+    )]
+    SubmitHeader { hexdata: String },
+
+    #[command(
+        name = "reconsiderblock",
+        about = "Removes the invalid state from a previously invalidated block",
+        long_about = Some(include_str!("../../../doc/rpc/reconsiderblock.md")),
+        disable_help_subcommand = true
+    )]
+    ReconsiderBlock { blockhash: BlockHash },
 }

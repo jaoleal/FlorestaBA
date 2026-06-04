@@ -94,7 +94,20 @@ pub enum DiskBlockHeader {
     InFork(BlockHeader, u32),
 
     /// Represents an invalid chain block header.
-    InvalidChain(BlockHeader),
+    InvalidChain(BlockHeader, u32, InvalidReason),
+}
+
+/// The reason a block was marked as part of an invalid chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidReason {
+    /// The block itself failed consensus validation.
+    ValidationFailed,
+
+    /// Explicitly marked invalid by the user via `invalidateblock` RPC.
+    UserInvalidated,
+
+    /// Descends from a block that was invalidated or failed validation.
+    DescendsFromInvalid,
 }
 
 impl DiskBlockHeader {
@@ -110,14 +123,13 @@ impl DiskBlockHeader {
             DiskBlockHeader::FullyValid(_, height) => Some(*height),
             DiskBlockHeader::HeadersOnly(_, height) => Some(*height),
             DiskBlockHeader::AssumedValid(_, height) => Some(*height),
-            // These two cases don't store the block height
+            DiskBlockHeader::InvalidChain(_, height, _) => Some(*height),
             DiskBlockHeader::Orphan(_) => None,
-            DiskBlockHeader::InvalidChain(_) => None,
         }
     }
 
     /// Gets the block height or returns `BlockchainError::OrphanOrInvalidBlock` if the block is
-    /// orphaned or on an invalid chain (the height is not stored).
+    /// orphaned (the height is not stored).
     pub fn try_height(&self) -> Result<u32, BlockchainError> {
         self.height().ok_or(BlockchainError::OrphanOrInvalidBlock)
     }
@@ -132,7 +144,7 @@ impl Deref for DiskBlockHeader {
             DiskBlockHeader::Orphan(header) => header,
             DiskBlockHeader::HeadersOnly(header, _) => header,
             DiskBlockHeader::InFork(header, _) => header,
-            DiskBlockHeader::InvalidChain(header) => header,
+            DiskBlockHeader::InvalidChain(header, _, _) => header,
             DiskBlockHeader::AssumedValid(header, _) => header,
         }
     }
@@ -161,7 +173,21 @@ impl Decodable for DiskBlockHeader {
 
                 Ok(Self::InFork(header, height))
             }
-            0x04 => Ok(Self::InvalidChain(header)),
+            0x04 => {
+                let height = u32::consensus_decode(reader)?;
+                let reason_byte = u8::consensus_decode(reader)?;
+                let reason = match reason_byte {
+                    0 => InvalidReason::ValidationFailed,
+                    1 => InvalidReason::UserInvalidated,
+                    2 => InvalidReason::DescendsFromInvalid,
+                    _ => {
+                        return Err(encode::Error::ParseFailed(
+                            "DiskBlockHeader: invalid InvalidReason tag",
+                        ));
+                    }
+                };
+                Ok(Self::InvalidChain(header, height, reason))
+            }
             0x05 => {
                 let height = u32::consensus_decode(reader)?;
                 Ok(Self::AssumedValid(header, height))
@@ -201,9 +227,17 @@ impl Encodable for DiskBlockHeader {
                 height.consensus_encode(writer)?;
                 len += 4;
             }
-            DiskBlockHeader::InvalidChain(header) => {
+            DiskBlockHeader::InvalidChain(header, height, reason) => {
                 0x04_u8.consensus_encode(writer)?;
                 header.consensus_encode(writer)?;
+                height.consensus_encode(writer)?;
+                let reason_byte: u8 = match reason {
+                    InvalidReason::ValidationFailed => 0,
+                    InvalidReason::UserInvalidated => 1,
+                    InvalidReason::DescendsFromInvalid => 2,
+                };
+                reason_byte.consensus_encode(writer)?;
+                len += 4 + 1;
             }
             DiskBlockHeader::AssumedValid(header, height) => {
                 0x05_u8.consensus_encode(writer)?;
@@ -214,6 +248,32 @@ impl Encodable for DiskBlockHeader {
         };
         Ok(len)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The validation status of a chain tip, as tracked by the chain backend.
+pub enum ChainTipStatus {
+    /// The current best chain tip.
+    Active,
+
+    /// A fully validated fork that is not the active chain.
+    ValidFork,
+
+    /// Headers received but blocks not yet fully validated.
+    HeadersOnly,
+
+    /// The chain contains at least one invalid block.
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// A chain tip with its block hash and validation status.
+pub struct ChainTipInfo {
+    /// The block hash of this chain tip.
+    pub hash: BlockHash,
+
+    /// The validation status of this chain tip.
+    pub status: ChainTipStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -342,13 +402,10 @@ mod tests {
             Err(BlockchainError::OrphanOrInvalidBlock)
         ));
 
-        // invalid chain → no height
-        let inv = DiskBlockHeader::InvalidChain(header);
-        assert_eq!(inv.height(), None);
-        assert!(matches!(
-            inv.try_height(),
-            Err(BlockchainError::OrphanOrInvalidBlock)
-        ));
+        // invalid chain → now stores height
+        let inv = DiskBlockHeader::InvalidChain(header, h, InvalidReason::UserInvalidated);
+        assert_eq!(inv.height(), Some(h));
+        assert_eq!(inv.try_height().unwrap(), h);
     }
 
     #[test]
@@ -370,7 +427,9 @@ mod tests {
             DiskBlockHeader::HeadersOnly(header, h),
             DiskBlockHeader::InFork(header, h),
             DiskBlockHeader::Orphan(header),
-            DiskBlockHeader::InvalidChain(header),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::ValidationFailed),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::UserInvalidated),
+            DiskBlockHeader::InvalidChain(header, h, InvalidReason::DescendsFromInvalid),
         ];
 
         for original in all_variants {

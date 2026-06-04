@@ -400,6 +400,28 @@ async fn handle_json_rpc_request(
             .await
             .map(|v| serde_json::to_value(v).expect(SERIALIZATION_EXPECT_MSG)),
 
+        "getchaintips" => state
+            .get_chain_tips()
+            .map(|v| serde_json::to_value(v).expect(SERIALIZATION_EXPECT_MSG)),
+
+        "invalidateblock" => {
+            let hash: BlockHash = get_at(&params, 0, "blockhash")?;
+            state.invalidate_block(hash)?;
+            Ok(Value::Null)
+        }
+
+        "submitheader" => {
+            let hex: String = get_at(&params, 0, "hexdata")?;
+            state.submit_header(hex)?;
+            Ok(Value::Null)
+        }
+
+        "reconsiderblock" => {
+            let hash: BlockHash = get_at(&params, 0, "blockhash")?;
+            state.reconsider_block(hash)?;
+            Ok(Value::Null)
+        }
+
         "gettxout" => {
             let txid = get_at(&params, 0, "txid")?;
             let vout = get_at(&params, 1, "vout")?;

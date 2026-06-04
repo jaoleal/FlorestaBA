@@ -35,6 +35,7 @@ use rustreexo::node_hash::BitcoinNodeHash;
 use rustreexo::proof::Proof;
 use rustreexo::stump::Stump;
 
+use self::chainstore::ChainTipInfo;
 use self::partial_chain::PartialChainState;
 use crate::BlockConsumer;
 use crate::BlockchainError;
@@ -104,8 +105,12 @@ pub trait BlockchainInterface {
         del_hashes: Vec<sha256::Hash>,
     ) -> Result<Stump, Self::Error>;
 
-    /// Returns all known chain tips, including the best one and forks
-    fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error>;
+    /// Returns all known chain tips, including the active tip and any forks.
+    ///
+    /// Each returned [ChainTipInfo] contains the tip's block hash and its
+    /// [ChainTipStatus](chainstore::ChainTipStatus), which reflects the validation
+    /// state of that branch. The first element is always the active chain tip.
+    fn get_chain_tips(&self) -> Result<Vec<ChainTipInfo>, Self::Error>;
 
     /// Validates a block according to Bitcoin's rules, without modifying our chain
     fn validate_block(
@@ -162,6 +167,10 @@ pub trait UpdatableChainstate {
     fn toggle_ibd(&self, is_ibd: bool);
     /// Tells this blockchain to consider this block invalid, and not build on top of it
     fn invalidate_block(&self, block: BlockHash) -> Result<(), BlockchainError>;
+    /// Removes the invalid state from a previously user-invalidated block and
+    /// re-evaluates chain selection. Only blocks invalidated via `invalidate_block`
+    /// can be reconsidered; consensus-invalid blocks are rejected.
+    fn reconsider_block(&self, block: BlockHash) -> Result<(), BlockchainError>;
     /// Marks one block as being fully validated, this overrides a block that was explicitly
     /// marked as invalid.
     fn mark_block_as_valid(&self, block: BlockHash) -> Result<(), BlockchainError>;
@@ -233,6 +242,10 @@ impl<T: UpdatableChainstate> UpdatableChainstate for Arc<T> {
 
     fn invalidate_block(&self, block: BlockHash) -> Result<(), BlockchainError> {
         T::invalidate_block(self, block)
+    }
+
+    fn reconsider_block(&self, block: BlockHash) -> Result<(), BlockchainError> {
+        T::reconsider_block(self, block)
     }
 
     fn get_partial_chain(
@@ -343,7 +356,7 @@ impl<T: BlockchainInterface> BlockchainInterface for Arc<T> {
         T::update_acc(self, acc, block, height, proof, del_hashes)
     }
 
-    fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error> {
+    fn get_chain_tips(&self) -> Result<Vec<ChainTipInfo>, Self::Error> {
         T::get_chain_tips(self)
     }
 

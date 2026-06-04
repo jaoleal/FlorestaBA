@@ -16,6 +16,7 @@ use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::constants::genesis_block;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::hex::FromHex;
 use corepc_types::ScriptPubkey;
 use corepc_types::v29::GetTxOut;
 use corepc_types::v30::DeploymentInfo;
@@ -337,8 +338,99 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
     // getblockstats
     // getchainstates
+
     // getchaintips
+    pub(super) fn get_chain_tips(&self) -> Result<Vec<super::res::ChainTip>, JsonRpcError> {
+        use super::res::ChainTip;
+        use super::res::ChainTipStatus;
+
+        let tips = self
+            .chain
+            .get_chain_tips()
+            .map_err(|_| JsonRpcError::Chain)?;
+
+        let (best_height, _) = self
+            .chain
+            .get_best_block()
+            .map_err(|_| JsonRpcError::Chain)?;
+
+        let mut result = Vec::with_capacity(tips.len());
+
+        for tip in tips {
+            let status = match tip.status {
+                floresta_chain::ChainTipStatus::Active => ChainTipStatus::Active,
+                floresta_chain::ChainTipStatus::ValidFork => ChainTipStatus::ValidFork,
+                floresta_chain::ChainTipStatus::HeadersOnly => ChainTipStatus::HeadersOnly,
+                floresta_chain::ChainTipStatus::Invalid => ChainTipStatus::Invalid,
+            };
+
+            if matches!(tip.status, floresta_chain::ChainTipStatus::Active) {
+                result.push(ChainTip {
+                    height: best_height,
+                    hash: tip.hash.to_string(),
+                    branchlen: 0,
+                    status,
+                });
+                continue;
+            }
+
+            let tip_height = self
+                .chain
+                .get_block_height(&tip.hash)
+                .map_err(|_| JsonRpcError::Chain)?
+                .ok_or(JsonRpcError::Chain)?;
+
+            // For invalid tips, get_fork_point may fail because ancestors
+            // are also marked invalid. Fall back to using the active chain
+            // height as the fork point estimate.
+            let branchlen = match self.chain.get_fork_point(tip.hash) {
+                Ok(fork_point) => {
+                    let fork_height = self
+                        .chain
+                        .get_block_height(&fork_point)
+                        .map_err(|_| JsonRpcError::Chain)?
+                        .ok_or(JsonRpcError::Chain)?;
+                    tip_height.saturating_sub(fork_height)
+                }
+                Err(_) => tip_height.saturating_sub(best_height),
+            };
+
+            result.push(ChainTip {
+                height: tip_height,
+                hash: tip.hash.to_string(),
+                branchlen,
+                status,
+            });
+        }
+
+        Ok(result)
+    }
+
     // getchaintxstats
+
+    // invalidateblock
+    pub(super) fn invalidate_block(&self, hash: BlockHash) -> Result<(), JsonRpcError> {
+        self.chain
+            .invalidate_block(hash)
+            .map_err(|_| JsonRpcError::BlockNotFound)
+    }
+
+    // submitheader
+    pub(super) fn submit_header(&self, hex: String) -> Result<(), JsonRpcError> {
+        let bytes = Vec::from_hex(&hex).map_err(|_| JsonRpcError::InvalidHex)?;
+        let header: Header = bitcoin::consensus::deserialize(&bytes)
+            .map_err(|e| JsonRpcError::Decode(e.to_string()))?;
+        self.chain
+            .accept_header(header)
+            .map_err(|_| JsonRpcError::Chain)
+    }
+
+    // reconsiderblock
+    pub(super) fn reconsider_block(&self, hash: BlockHash) -> Result<(), JsonRpcError> {
+        self.chain
+            .reconsider_block(hash)
+            .map_err(|_| JsonRpcError::BlockNotFound)
+    }
 
     // getdeploymentinfo
     pub(super) fn get_deployment_info(

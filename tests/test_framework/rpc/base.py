@@ -410,6 +410,12 @@ class BaseRPC(ABC):
         """
         return self.perform_request("listdescriptors")
 
+    def get_chain_tips(self) -> list:
+        """
+        Return information about all known tips in the block tree
+        """
+        return self.perform_request("getchaintips")
+
     def get_addrman_info(self) -> dict:
         """
         Get address manager statistics broken down by network

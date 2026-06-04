@@ -313,6 +313,10 @@ impl UpdatableChainstate for PartialChainState {
         )
     }
 
+    fn reconsider_block(&self, _block: BlockHash) -> Result<(), BlockchainError> {
+        unimplemented!("partial chains don't support block reconsideration")
+    }
+
     fn handle_transaction(&self) -> Result<(), BlockchainError> {
         unimplemented!("we don't do transactions")
     }
@@ -397,7 +401,7 @@ impl BlockchainInterface for PartialChainState {
         unimplemented!("PartialChainState::get_block_header")
     }
 
-    fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error> {
+    fn get_chain_tips(&self) -> Result<Vec<super::chainstore::ChainTipInfo>, Self::Error> {
         unimplemented!("PartialChainState::get_chain_tips")
     }
 

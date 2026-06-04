@@ -155,6 +155,25 @@ pub trait FlorestaRPC {
     fn ping(&self) -> Result<()>;
     /// Returns address manager statistics broken down by network.
     fn get_addrman_info(&self) -> Result<GetAddrManInfo>;
+
+    /// Returns information about all known chain tips in the block tree.
+    ///
+    /// This includes the main chain tip and any orphaned branches. Each tip includes
+    /// its height, hash, branch length (distance to the main chain), and validation status.
+    #[doc = include_str!("../../../doc/rpc/getchaintips.md")]
+    fn get_chain_tips(&self) -> Result<Vec<ChainTip>>;
+
+    /// Permanently marks a block as invalid, as if it violated a consensus rule.
+    #[doc = include_str!("../../../doc/rpc/invalidateblock.md")]
+    fn invalidate_block(&self, blockhash: BlockHash) -> Result<()>;
+
+    /// Decodes the given hex data as a block header and submits it as a candidate chain tip.
+    #[doc = include_str!("../../../doc/rpc/submitheader.md")]
+    fn submit_header(&self, hexdata: String) -> Result<()>;
+
+    /// Removes the invalid state from a previously invalidated block.
+    #[doc = include_str!("../../../doc/rpc/reconsiderblock.md")]
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()>;
 }
 
 /// Since the workflow for jsonrpc is the same for all methods, we can implement a trait
@@ -378,5 +397,21 @@ impl<T: JsonRPCClient> FlorestaRPC for T {
 
     fn get_addrman_info(&self) -> Result<GetAddrManInfo> {
         self.call("getaddrmaninfo", &[])
+    }
+
+    fn get_chain_tips(&self) -> Result<Vec<rpc_types::ChainTip>> {
+        self.call("getchaintips", &[])
+    }
+
+    fn invalidate_block(&self, blockhash: BlockHash) -> Result<()> {
+        self.call("invalidateblock", &[Value::String(blockhash.to_string())])
+    }
+
+    fn submit_header(&self, hexdata: String) -> Result<()> {
+        self.call("submitheader", &[Value::String(hexdata)])
+    }
+
+    fn reconsider_block(&self, blockhash: BlockHash) -> Result<()> {
+        self.call("reconsiderblock", &[Value::String(blockhash.to_string())])
     }
 }
