@@ -162,6 +162,14 @@ pub trait FlorestaRPC {
     /// its height, hash, branch length (distance to the main chain), and validation status.
     #[doc = include_str!("../../../doc/rpc/getchaintips.md")]
     fn get_chain_tips(&self) -> Result<Vec<ChainTip>>;
+
+    /// Permanently marks a block as invalid, as if it violated a consensus rule.
+    #[doc = include_str!("../../../doc/rpc/invalidateblock.md")]
+    fn invalidate_block(&self, blockhash: BlockHash) -> Result<()>;
+
+    /// Decodes the given hex data as a block header and submits it as a candidate chain tip.
+    #[doc = include_str!("../../../doc/rpc/submitheader.md")]
+    fn submit_header(&self, hexdata: String) -> Result<()>;
 }
 
 /// Since the workflow for jsonrpc is the same for all methods, we can implement a trait
@@ -389,5 +397,13 @@ impl<T: JsonRPCClient> FlorestaRPC for T {
 
     fn get_chain_tips(&self) -> Result<Vec<rpc_types::ChainTip>> {
         self.call("getchaintips", &[])
+    }
+
+    fn invalidate_block(&self, blockhash: BlockHash) -> Result<()> {
+        self.call("invalidateblock", &[Value::String(blockhash.to_string())])
+    }
+
+    fn submit_header(&self, hexdata: String) -> Result<()> {
+        self.call("submitheader", &[Value::String(hexdata)])
     }
 }

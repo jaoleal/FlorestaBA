@@ -16,6 +16,7 @@ use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::constants::genesis_block;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::hex::FromHex;
 use corepc_types::ScriptPubkey;
 use corepc_types::v29::GetTxOut;
 use corepc_types::v30::DeploymentInfo;
@@ -406,6 +407,23 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     }
 
     // getchaintxstats
+
+    // invalidateblock
+    pub(super) fn invalidate_block(&self, hash: BlockHash) -> Result<(), JsonRpcError> {
+        self.chain
+            .invalidate_block(hash)
+            .map_err(|_| JsonRpcError::BlockNotFound)
+    }
+
+    // submitheader
+    pub(super) fn submit_header(&self, hex: String) -> Result<(), JsonRpcError> {
+        let bytes = Vec::from_hex(&hex).map_err(|_| JsonRpcError::InvalidHex)?;
+        let header: Header = bitcoin::consensus::deserialize(&bytes)
+            .map_err(|e| JsonRpcError::Decode(e.to_string()))?;
+        self.chain
+            .accept_header(header)
+            .map_err(|_| JsonRpcError::Chain)
+    }
 
     // getdeploymentinfo
     pub(super) fn get_deployment_info(
