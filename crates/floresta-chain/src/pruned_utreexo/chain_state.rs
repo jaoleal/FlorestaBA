@@ -349,8 +349,13 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         let mut header = DiskBlockHeader::HeadersOnly(*new_tip, height);
 
         while !self.is_genesis(&header) && header.block_hash() != fork_point {
-            let disk_header = DiskBlockHeader::HeadersOnly(*header, height);
-            let hash = disk_header.block_hash();
+            let hash = header.block_hash();
+
+            // Preserve FullyValid status for blocks we already validated.
+            let disk_header = match self.get_disk_block_header(&hash) {
+                Ok(DiskBlockHeader::FullyValid(h, _)) => DiskBlockHeader::FullyValid(h, height),
+                _ => DiskBlockHeader::HeadersOnly(*header, height),
+            };
 
             self.update_header_and_index(&disk_header, hash, height)?;
 
