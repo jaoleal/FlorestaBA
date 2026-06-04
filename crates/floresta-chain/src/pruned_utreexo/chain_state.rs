@@ -446,16 +446,67 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
     // This method should only be called after we validate the new branch
     fn reorg(&self, new_tip: BlockHeader) -> Result<(), BlockchainError> {
         let current_best_block = self.get_block_header(&self.get_best_block()?.1)?;
+        let old_best_hash = self.get_best_block()?.1;
         let fork_point = self.find_fork_point(&new_tip)?;
+        let fork_hash = fork_point.block_hash();
 
-        self.mark_chain_as_inactive(&current_best_block, fork_point.block_hash())?;
-        self.mark_chain_as_active(&new_tip, fork_point.block_hash())?;
+        self.mark_chain_as_inactive(&current_best_block, fork_hash)?;
+        self.mark_chain_as_active(&new_tip, fork_hash)?;
 
         let validation_index = self.get_last_valid_block(&new_tip)?;
         let depth = self.get_chain_depth(&new_tip)?;
 
         self.change_active_chain(&new_tip, validation_index, depth);
         self.reorg_acc(&fork_point)?;
+
+        // Update alternative_tips: remove any tips that are now ancestors of
+        // the new active chain, and add the old active tip.
+        let mut new_chain_hashes = alloc::collections::BTreeSet::new();
+        {
+            let mut h = new_tip;
+            while h.block_hash() != fork_hash && !self.is_genesis(&h) {
+                new_chain_hashes.insert(h.block_hash());
+                h = *self.get_ancestor(&h)?;
+            }
+        }
+
+        // Check whether old_best_hash is already an ancestor of any remaining
+        // alternative tip. If so, it is not a true leaf and should not be added.
+        let old_best_is_ancestor = {
+            let inner = read_lock!(self);
+            inner.best_block.alternative_tips.iter().any(|&tip_hash| {
+                if new_chain_hashes.contains(&tip_hash) {
+                    return false; // will be removed
+                }
+                let mut h = tip_hash;
+                loop {
+                    if h == old_best_hash {
+                        return true;
+                    }
+                    match inner.chainstore.get_header(&h) {
+                        Ok(Some(dh)) => {
+                            let prev = dh.prev_blockhash;
+                            if prev == h {
+                                return false; // genesis
+                            }
+                            h = prev;
+                        }
+                        _ => return false,
+                    }
+                }
+            })
+        };
+
+        {
+            let mut inner = write_lock!(self);
+            inner
+                .best_block
+                .alternative_tips
+                .retain(|h| !new_chain_hashes.contains(h));
+            if !old_best_is_ancestor {
+                inner.best_block.alternative_tips.push(old_best_hash);
+            }
+        }
 
         Ok(())
     }
