@@ -243,6 +243,29 @@ checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 [[package]]
 name = "bindgen"
 version = "0.72.1"
+<<<<<<< HEAD
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn",
+]
+
+[[package]]
+name = "bip324"
+version = "0.11.0"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
@@ -419,8 +442,12 @@ dependencies = [
 [[package]]
 name = "bitcoinkernel"
 version = "0.2.0"
+<<<<<<< HEAD
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9c800b68ef4ad5c3bf1d668375433934b97faaa487758b7b8aadff42764c2d"
+=======
+source = "git+https://github.com/jaoleal/rust-bitcoinkernel#1b52c2f28ec47126e617cf711667b0470b124f87"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 dependencies = [
  "libbitcoinkernel-sys",
 ]
@@ -564,6 +591,20 @@ dependencies = [
 [[package]]
 name = "clang-sys"
 version = "1.8.1"
+<<<<<<< HEAD
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
+]
+
+[[package]]
+name = "clap"
+version = "4.6.1"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
@@ -1368,6 +1409,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1794,8 +1841,12 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "libbitcoinkernel-sys"
 version = "0.2.0"
+<<<<<<< HEAD
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35576852961d85614bb5dd3f8a3283b2c4b4310d9dc306f07b4b0b6a6b039eeb"
+=======
+source = "git+https://github.com/jaoleal/rust-bitcoinkernel#1b52c2f28ec47126e617cf711667b0470b124f87"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 dependencies = [
  "bindgen",
  "cc",
@@ -1820,6 +1871,19 @@ dependencies = [
 [[package]]
 name = "libloading"
 version = "0.8.9"
+<<<<<<< HEAD
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "libredox"
+version = "0.1.16"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
@@ -2454,9 +2518,15 @@ dependencies = [
 
 [[package]]
 name = "rustc-hash"
+<<<<<<< HEAD
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+=======
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+>>>>>>> 9cfc6488 (deps: point bitcoinkernel to jaoleal/rust-bitcoinkernel)
 
 [[package]]
 name = "rustc_version"
