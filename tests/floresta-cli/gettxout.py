@@ -7,10 +7,7 @@ This functional test cli utility to interact with a Floresta node with `gettxout
 """
 
 import pytest
-from test_framework.util import compare_fields, wait_until
-
-# How many blocks we mine that Floresta can accept as headers, but never validate.
-UNVALIDATED_BLOCKS = 5
+from test_framework.util import compare_fields
 
 
 # pylint: disable=too-many-locals
@@ -52,39 +49,17 @@ def test_get_txout(setup_logging, florestad_bitcoind_utreexod_with_chain, node_m
 
 @pytest.mark.rpc
 def test_get_txout_counts_from_the_validated_tip(
-    setup_logging, florestad_bitcoind_utreexod_with_chain, node_manager
+    setup_logging, florestad_with_unvalidated_headers
 ):
     """
     Check that `bestblock` and `confirmations` follow the last validated block.
 
     An utxo only exists as far as we validated, so both fields must be relative
-    to that, the same way Bitcoin Core reports them against its chainstate tip.
-    Floresta accepts headers before having the blocks they describe, and it
-    needs the utreexo proof shipped with a block to validate it. Dropping the
-    only utreexo peer and mining on bitcoind leaves it with headers it can
-    never validate, which is the only moment the two tips differ.
+    to that, the same way Bitcoin Core reports them against its chainstate tip,
+    and never to a header whose block we couldn't verify.
     """
     log = setup_logging
-    blocks = 20
-    florestad, bitcoind, utreexod = florestad_bitcoind_utreexod_with_chain(blocks)
-
-    log.info("Waiting for Floresta and Bitcoind to sync with Utreexod...")
-    node_manager.wait_for_sync_nodes()
-
-    height = blocks // 2
-    txid = florestad.rpc.get_block(florestad.rpc.get_blockhash(height))["tx"][0]
-
-    log.info("Stopping the only utreexo peer, so nothing else can be validated...")
-    utreexod.stop()
-
-    log.info(f"Mining {UNVALIDATED_BLOCKS} blocks Floresta can't get a proof for...")
-    bitcoind.rpc.generate_block(UNVALIDATED_BLOCKS)
-
-    headers = blocks + UNVALIDATED_BLOCKS
-    wait_until(
-        lambda: florestad.rpc.get_blockchain_info()["headers"] == headers,
-        error_msg=f"Floresta didn't accept the {UNVALIDATED_BLOCKS} new headers",
-    )
+    florestad, _, blocks, headers = florestad_with_unvalidated_headers()
 
     chain_info = florestad.rpc.get_blockchain_info()
     assert (
@@ -92,6 +67,9 @@ def test_get_txout_counts_from_the_validated_tip(
     ), "Floresta validated blocks it can't have a proof for."
 
     log.info(f"Floresta is at header {headers}, but validated only up to {blocks}...")
+    height = blocks // 2
+    txid = florestad.rpc.get_block(florestad.rpc.get_blockhash(height))["tx"][0]
+
     txout = florestad.rpc.get_txout(txid, vout=0, include_mempool=False)
     assert txout is not None, f"Txout for tx {txid} is None in Floresta."
 

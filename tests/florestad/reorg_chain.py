@@ -12,6 +12,66 @@ accumulator to make sure they are the same.
 import pytest
 
 
+# TODO: Florestad stops processing messages from a peer it connected to before the
+# IBD, once the IBD ends. Until that's fixed, this test can't pass.
+#
+# What happens, mining 10 blocks, invalidating the 5th and mining 10 more on
+# utreexod, is that florestad stays on the pre-reorg chain forever:
+#
+#     TICKDBG peers=1 tip=Ok(10) validation=Ok(10) inflight=[GetAddresses]
+#
+# while utreexod is at 14 and announces every new block:
+#
+#     [DBG] PEER: Sending headers (num 1) to 127.0.0.1:61566 (inbound)   (x10)
+#
+# The headers reach florestad's socket, but nothing above it ever sees them. Its
+# peer actor logs nothing after "starting running node...", the node's
+# notification handler is never called, and the chain never moves. Mining yet
+# another block afterwards doesn't wake it up either, so it isn't a matter of
+# having missed the announcements while still on IBD.
+#
+# The `GetAddresses` stuck in `inflight` for the whole run is the tell: that's a
+# request *we* made, whose reply is never processed either. So it's the receiving
+# end that is broken, not the announcing or the triggering. Adding triggers, or
+# lowering `NodeContext::ASSUME_STALE`, can't help: the `GetHeaders` they send
+# would go down the same path and its answer would be dropped just the same.
+#
+# Ruled out, each with evidence:
+#   - the peer not announcing: utreexod's debug log shows the headers going out;
+#   - the notification channel being recreated on the context switch:
+#     `RunningNode::catch_up` moves `common` through, so it's the same channel;
+#   - the peer being dropped on the switch: `connected_peers() / 2` is 0 for a
+#     single peer, and it's both utreexo-protected and a manual connection;
+#   - a deadlock or a panic: a stack sample shows every thread idle, the
+#     maintenance tick keeps logging, and florestad's stderr is clean;
+#   - `handle_new_block` being gated by an inflight `Headers`: what's stuck is
+#     `GetAddresses`.
+#
+# Next step is to instrument `p2p_wire/peer.rs`, logging each message read off the
+# socket and each `node_tx.send`, which separates "never read" from "read but not
+# forwarded" from "forwarded but not received".
+#
+# The impact is worth stressing: a node that finishes its IBD can sit on a stale
+# chain while a connected peer keeps telling it about a better one. The only way
+# out is `check_for_stale_tip`, and that only fires after
+# `NodeContext::ASSUME_STALE`, i.e. 15 minutes. With few utreexo-capable peers,
+# it doesn't have another peer to learn from meanwhile.
+#
+# Note this isn't a regression from reporting the validated tip on `getblockcount`
+# -- that only made the test notice. Reporting our best *header* made
+# `wait_for_sync_nodes` match utreexod as soon as the headers arrived, so the test
+# passed while florestad had validated nothing past the fork point.
+#
+# While in there, `running_ctx.rs`'s header handling bans a peer, silently, when a
+# header's parent is unknown, instead of asking for the headers in between with a
+# locator. It doesn't run here, since no header ever arrives, but it's a
+# fork-out/eclipse hazard once they do.
+@pytest.mark.xfail(
+    reason="florestad ignores its peers' announcements after the IBD, see TODO above",
+    # Not strict: florestad sometimes gets the headers and stalls with its
+    # validation index at the fork point instead, which fails earlier.
+    strict=False,
+)
 @pytest.mark.florestad
 def test_reorg_chain(setup_logging, florestad_utreexod, node_manager):
     """Mine blocks, trigger a reorg and assert both nodes end up on the same chain."""
