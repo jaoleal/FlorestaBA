@@ -548,8 +548,24 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         ) {
             (Some(cached_tx), Some(height), Some(txout)) => {
                 let is_coinbase = cached_tx.tx.is_coinbase();
-                let Ok((bestblock_height, bestblock_hash)) = self.chain.get_best_block() else {
+
+                // An utxo only exists as far as we validated, so both fields below are
+                // relative to the last block we validated, like Bitcoin Core reports them
+                // against its chainstate tip. Our best block may be way ahead of it, as we
+                // accept headers before having the blocks they describe.
+                let Ok(bestblock_height) = self.chain.get_validation_index() else {
+                    return Err(JsonRpcError::Chain);
+                };
+
+                let Ok(bestblock_hash) = self.chain.get_block_hash(bestblock_height) else {
                     return Err(JsonRpcError::BlockNotFound);
+                };
+
+                // A block we haven't validated yet doesn't confirm anything, even if the
+                // wallet already cached it while scanning the block filters.
+                let confirmations = match bestblock_height.checked_sub(height) {
+                    Some(depth) => depth + 1,
+                    None => 0,
                 };
 
                 let script = txout.script_pubkey.as_script();
@@ -578,7 +594,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
                 Some(GetTxOut {
                     best_block: bestblock_hash.to_string(),
-                    confirmations: bestblock_height - height + 1,
+                    confirmations,
                     value: txout.value.to_btc(),
                     script_pubkey,
                     coinbase: is_coinbase,
