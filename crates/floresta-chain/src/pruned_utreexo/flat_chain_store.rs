@@ -1105,6 +1105,17 @@ impl FlatChainStore {
     }
 
     unsafe fn do_flush(&mut self) -> Result<(), FlatChainstoreError> {
+        // Get the roots on disk before the headers that point at them. `acc_pos` and
+        // `acc_len` only mean anything if the bytes they describe are there: a header
+        // reaching durable storage first leaves us reading whatever happens to live at
+        // that offset, which we can't tell apart from a real accumulator.
+        //
+        // `save_roots_for_block` calls `flush` on this file, but that does nothing for
+        // a `File`, which isn't buffered. `sync_data` is what actually writes it out,
+        // and it's enough here, as we only care about the contents and not about the
+        // metadata around them.
+        self.accumulator_file.sync_data()?;
+
         self.headers.flush()?;
         self.block_index.flush()?;
         self.fork_headers.flush()?;
