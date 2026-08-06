@@ -11,6 +11,11 @@ accumulator to make sure they are the same.
 
 import pytest
 
+# Florestad used to only ask its peers where the tip was every
+# `NodeContext::ASSUME_STALE`, 15 minutes. Utreexod announces the reorg once,
+# while we're still finishing the IBD, and never repeats itself, so we would sit
+# on the pre-reorg chain until then. It asks on its way out of the IBD and
+# whenever a peer finishes its handshake now, which is what this test leans on.
 
 @pytest.mark.florestad
 def test_reorg_chain(setup_logging, florestad_utreexod, node_manager):
