@@ -45,3 +45,33 @@ def test_get_txout(setup_logging, florestad_bitcoind_utreexod_with_chain, node_m
             assert txout_bitcoind is not None, f"Txout for tx {tx} is None in Bitcoind."
 
             compare_fields(txout_floresta, txout_bitcoind)
+
+
+@pytest.mark.rpc
+def test_get_txout_counts_from_the_validated_tip(
+    setup_logging, florestad_with_unvalidated_headers
+):
+    """
+    Check that `bestblock` and `confirmations` follow the last validated block.
+
+    An utxo only exists as far as we validated, so both fields must be relative
+    to that, the same way Bitcoin Core reports them against its chainstate tip,
+    and never to a header whose block we couldn't verify.
+    """
+    log = setup_logging
+    florestad, _, blocks, headers = florestad_with_unvalidated_headers()
+
+    chain_info = florestad.rpc.get_blockchain_info()
+    assert (
+        chain_info["blocks"] == blocks
+    ), "Floresta validated blocks it can't have a proof for."
+
+    log.info(f"Floresta is at header {headers}, but validated only up to {blocks}...")
+    height = blocks // 2
+    txid = florestad.rpc.get_block(florestad.rpc.get_blockhash(height))["tx"][0]
+
+    txout = florestad.rpc.get_txout(txid, vout=0, include_mempool=False)
+    assert txout is not None, f"Txout for tx {txid} is None in Floresta."
+
+    assert txout["bestblock"] == florestad.rpc.get_blockhash(blocks)
+    assert txout["confirmations"] == blocks - height + 1

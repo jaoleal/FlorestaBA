@@ -12,6 +12,11 @@ from typing import Any
 import pytest
 from test_framework.util import compare_fields
 
+# Enough to cross a few regtest retargets, which happen every 150 blocks, while
+# staying small enough that everyone validates it quickly. Bigger chains only
+# make utreexod and florestad thrash the disk against each other.
+CHAIN_BLOCKS = 200
+
 
 class TestGetBlock:
     """Functional tests for the getblock RPC, comparing Florestad vs Bitcoin Core."""
@@ -22,9 +27,10 @@ class TestGetBlock:
     log: Any = None
     node_manager: Any = None
 
+    # pylint: disable=too-many-arguments too-many-positional-arguments
     @pytest.mark.rpc
     def test_get_block(
-        self, florestad_node, bitcoind_node, setup_logging, node_manager
+        self, florestad_node, bitcoind_node, utreexod_node, setup_logging, node_manager
     ):
         """
         Test the getblock RPC command. Verifies that Florestad's getblock RPC responses are
@@ -35,15 +41,24 @@ class TestGetBlock:
         self.log = setup_logging
         self.node_manager = node_manager
 
-        self.bitcoind.rpc.generate_block(2017)
+        # Utreexod mines, so it holds the proofs Florestad needs to validate the
+        # chain. Without them Florestad accepts the headers but never validates
+        # a block, and its tip stays on the genesis. The whole chain is mined
+        # before connecting, otherwise the last blocks are announced while
+        # Florestad is still on IBD and it won't ask for them again.
+        utreexod_node.rpc.generate(CHAIN_BLOCKS)
         time.sleep(1)
-        self.bitcoind.rpc.generate_block(6)
+        utreexod_node.rpc.generate(6)
 
+        self.node_manager.connect_nodes(self.florestad, utreexod_node)
+        time.sleep(3)
+        self.node_manager.connect_nodes(self.bitcoind, utreexod_node)
+        time.sleep(1)
         self.node_manager.connect_nodes(self.florestad, self.bitcoind)
 
-        block_count = self.bitcoind.rpc.get_block_count()
-
         self.node_manager.wait_for_sync_nodes(is_finished_ibd=False)
+
+        block_count = self.bitcoind.rpc.get_block_count()
 
         self.log.info("Testing getblock RPC in the genesis block")
         self.compare_block(0)
