@@ -600,7 +600,12 @@ where
         // update this or we'll get this warning every second after 15 minutes without a block,
         // until we get a new block.
         self.last_tip_update = Instant::now();
-        self.create_connection(ConnectionKind::Extra)?;
+
+        // Asking the peers we already have is what gets us unstuck; reaching for one
+        // more is a bonus. Don't let it take the request down with it: a node whose
+        // peers are all manual has no address to dial, and would never ask again.
+        try_and_log!(self.create_connection(ConnectionKind::Extra));
+
         self.send_to_random_peer(
             NodeRequest::GetHeaders(self.chain.get_block_locator().unwrap()),
             ServiceFlags::NONE,
