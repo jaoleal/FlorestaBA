@@ -369,6 +369,12 @@ where
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         info!("starting running node...");
+
+        // Whatever our peers announced while we were catching up is gone by now, and
+        // they won't repeat themselves. Ask once here, or we settle on the chain we
+        // happened to stop at until the tip goes stale, a quarter of an hour later.
+        try_and_log!(self.ask_for_headers(None));
+
         loop {
             tokio::select! {
                 biased;
@@ -588,6 +594,37 @@ where
         score
     }
 
+    /// Asks where the tip is, either to `peer` or to whoever answers first.
+    ///
+    /// Our peers only tell us about blocks they learn of while we're listening, so
+    /// anything mined before we got here, or while we were busy elsewhere, is only
+    /// visible if we go and ask for it. Waiting to be told leaves us on whatever
+    /// chain we happened to stop at.
+    ///
+    /// Does nothing if we're already asking someone, so the answer to that one can
+    /// arrive, or time out and be retried, before we ask again.
+    fn ask_for_headers(&mut self, peer: Option<PeerId>) -> Result<(), WireError> {
+        if self.inflight.contains_key(&InflightRequests::Headers) {
+            return Ok(());
+        }
+
+        let locator = self.chain.get_block_locator()?;
+        let peer = match peer {
+            Some(peer) => {
+                self.send_to_peer(peer, NodeRequest::GetHeaders(locator))?;
+                peer
+            }
+            None => {
+                self.send_to_random_peer(NodeRequest::GetHeaders(locator), ServiceFlags::NONE)?
+            }
+        };
+
+        self.inflight
+            .insert(InflightRequests::Headers, (peer, Instant::now()));
+
+        Ok(())
+    }
+
     /// This function checks how many time has passed since our last tip update, if it's
     /// been more than 15 minutes, try to update it.
     fn check_for_stale_tip(&mut self) -> Result<(), WireError> {
@@ -799,6 +836,12 @@ where
                             version.kind
                         );
                         self.handle_peer_ready(peer, version)?;
+
+                        // A peer we just met is the cheapest way to find out we're
+                        // behind. `handle_peer_ready` only does this for the extra
+                        // peers it opens to chase a stale tip, so everyone else, our
+                        // manual and utreexo peers included, would never be asked.
+                        try_and_log!(self.ask_for_headers(Some(peer)));
                     }
 
                     PeerMessages::Disconnected(idx) => {
