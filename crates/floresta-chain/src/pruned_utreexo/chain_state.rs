@@ -965,31 +965,50 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         next_header: &BlockHeader,
     ) -> Result<Target, BlockchainError> {
         let params: ChainParams = self.chain_params();
-        // Special testnet rule, if a block takes more than 20 minutes to mine, we can
-        // mine a block with diff 1
-        if params.params.allow_min_difficulty_blocks
-            && last_block.time + params.params.pow_target_spacing as u32 * 2 < next_header.time
-        {
-            return Ok(params.params.max_attainable_target);
+        let max_target = params.params.max_attainable_target;
+
+        // Only change the target at each difficulty adjustment interval
+        if next_height % 2016 != 0 {
+            if params.params.allow_min_difficulty_blocks {
+                // Special testnet rule, if a block takes more than 20 minutes to mine, we can
+                // mine a block with diff 1
+                if next_header.time > last_block.time + params.params.pow_target_spacing as u32 * 2
+                {
+                    return Ok(max_target);
+                }
+
+                // Otherwise, we require the target of the last block that was not itself a
+                // min-difficulty exception, walking back at most to the epoch's first block
+                let mut height = next_height - 1;
+                let mut header = *last_block;
+                while height % 2016 != 0 && header.target() == max_target {
+                    height -= 1;
+                    header = *self.get_header_by_height(height)?;
+                }
+
+                return Ok(header.target());
+            }
+
+            return Ok(last_block.target());
         }
 
         // Regtest don't have retarget
-        if !params.params.no_pow_retargeting && (next_height) % 2016 == 0 {
-            // First block in this epoch
-            let first_block = self.get_header_by_height(next_height - 2016)?;
-            let last_block = self.get_header_by_height(next_height - 1)?;
-
-            let target =
-                Consensus::calc_next_work_required(&last_block, &first_block, self.chain_params());
-
-            if target < params.params.max_attainable_target {
-                return Ok(target);
-            }
-
-            return Ok(params.params.max_attainable_target);
+        if params.params.no_pow_retargeting {
+            return Ok(last_block.target());
         }
 
-        Ok(last_block.target())
+        // First block in this epoch
+        let first_block = self.get_header_by_height(next_height - 2016)?;
+        let last_block = self.get_header_by_height(next_height - 1)?;
+
+        let target =
+            Consensus::calc_next_work_required(&last_block, &first_block, self.chain_params());
+
+        if target < max_target {
+            return Ok(target);
+        }
+
+        Ok(max_target)
     }
 
     /// Check timestamp against prev for difficulty-adjustment blocks to prevent timewarp attacks.
