@@ -2040,6 +2040,120 @@ mod test {
         assert_eq!(0x1e012fa7, next_target.to_compact_lossy().to_consensus());
     }
 
+    /// Only `time` and `bits` are read by the difficulty computation
+    fn difficulty_header(time: u32, bits: u32) -> BlockHeader {
+        BlockHeader {
+            version: HeaderVersion::ONE,
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time,
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        }
+    }
+
+    /// Stores a header at the given height, bypassing validation
+    fn store_header(chain: &ChainState<FlatChainStore>, header: BlockHeader, height: u32) {
+        chain
+            .update_header_and_index(
+                &DiskBlockHeader::HeadersOnly(header, height),
+                header.block_hash(),
+                height,
+            )
+            .unwrap();
+    }
+
+    const TESTNET_MIN_DIFF_BITS: u32 = 0x1d00_ffff;
+    const TESTNET_REAL_DIFF_BITS: u32 = 0x1c00_ffff;
+
+    #[test]
+    fn test_no_min_diff_exception_at_retarget_boundary() {
+        // The 20-minute min-difficulty exception must never apply at a retarget boundary:
+        // Core performs the normal retarget there regardless of the block's timestamp
+        let chain = setup_test_chain(Network::Testnet4, AssumeValidArg::Hardcoded, None);
+        let params = ChainParams::from(Network::Testnet4);
+        let spacing = params.params.pow_target_spacing as u32;
+
+        // The epoch ending at height 4031 took half the target timespan, so the
+        // retarget must double the difficulty
+        let t0 = 1_700_000_000;
+        let first = difficulty_header(t0, TESTNET_REAL_DIFF_BITS);
+        let last = difficulty_header(
+            t0 + params.pow_target_timespan as u32 / 2,
+            TESTNET_REAL_DIFF_BITS,
+        );
+        store_header(&chain, first, 2016);
+        store_header(&chain, last, 4031);
+
+        // The boundary block arrives more than 20 minutes after the tip
+        let next = difficulty_header(last.time + 2 * spacing + 1, TESTNET_REAL_DIFF_BITS);
+        let got = chain.get_next_required_work(&last, 4032, &next).unwrap();
+
+        let expected = Consensus::calc_next_work_required(&last, &first, chain.chain_params());
+        assert_ne!(expected, params.params.max_attainable_target);
+        assert_eq!(
+            got, expected,
+            "the min-difficulty exception must not replace the retarget at a boundary"
+        );
+    }
+
+    #[test]
+    fn test_min_diff_walks_back_to_last_real_target() {
+        // When a block arrives within 20 minutes of its parent, the required difficulty
+        // is that of the last block which was not a min-difficulty exception, walking
+        // back at most to the start of the current epoch
+        let chain = setup_test_chain(Network::Testnet4, AssumeValidArg::Hardcoded, None);
+        let params = ChainParams::from(Network::Testnet4);
+        let spacing = params.params.pow_target_spacing as u32;
+
+        // A boundary block with real difficulty, then two min-difficulty exception
+        // blocks, each mined more than 20 minutes after its parent
+        let t0 = 1_700_000_000;
+        let boundary = difficulty_header(t0, TESTNET_REAL_DIFF_BITS);
+        let min1 = difficulty_header(t0 + 2 * spacing + 1, TESTNET_MIN_DIFF_BITS);
+        let min2 = difficulty_header(min1.time + 2 * spacing + 1, TESTNET_MIN_DIFF_BITS);
+        store_header(&chain, boundary, 4032);
+        store_header(&chain, min1, 4033);
+        store_header(&chain, min2, 4034);
+        assert_eq!(min2.target(), params.params.max_attainable_target);
+
+        // A block mined 20+ minutes after the tip may still use min difficulty
+        let slow = difficulty_header(min2.time + 2 * spacing + 1, TESTNET_MIN_DIFF_BITS);
+        let got = chain.get_next_required_work(&min2, 4035, &slow).unwrap();
+        assert_eq!(got, params.params.max_attainable_target);
+
+        // But one mined within 20 minutes must be at the boundary block's difficulty
+        let quick = difficulty_header(min2.time + spacing / 2, TESTNET_REAL_DIFF_BITS);
+        let got = chain.get_next_required_work(&min2, 4035, &quick).unwrap();
+        assert_eq!(
+            got,
+            boundary.target(),
+            "must walk back past min-difficulty blocks to the last real target"
+        );
+    }
+
+    #[test]
+    fn test_min_diff_walk_back_stops_at_boundary() {
+        // On testnet3 a retarget can itself hit the pow limit, making the boundary
+        // block min-difficulty. The walk-back must stop there and not reach into the
+        // previous epoch
+        let chain = setup_test_chain(Network::Testnet, AssumeValidArg::Hardcoded, None);
+        let params = ChainParams::from(Network::Testnet);
+        let spacing = params.params.pow_target_spacing as u32;
+
+        let t0 = 1_700_000_000;
+        let prev_epoch_tip = difficulty_header(t0, TESTNET_REAL_DIFF_BITS);
+        let boundary = difficulty_header(t0 + spacing, TESTNET_MIN_DIFF_BITS);
+        store_header(&chain, prev_epoch_tip, 2015);
+        store_header(&chain, boundary, 2016);
+
+        let quick = difficulty_header(boundary.time + spacing / 2, TESTNET_MIN_DIFF_BITS);
+        let got = chain
+            .get_next_required_work(&boundary, 2017, &quick)
+            .unwrap();
+        assert_eq!(got, params.params.max_attainable_target);
+    }
+
     #[test]
     fn test_reorg() {
         let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Hardcoded, None);
