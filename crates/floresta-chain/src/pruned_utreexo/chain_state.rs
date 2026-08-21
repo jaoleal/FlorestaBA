@@ -221,42 +221,68 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         Ok(())
     }
 
+    /// Validates one non-genesis header.
+    ///
+    /// Core's [`AcceptBlockHeader`] handles duplicates, then validates a new header:
+    /// 1. calls [`CheckBlockHeader`], which calls [`CheckProofOfWork`],
+    /// 2. looks up and checks the parent,
+    /// 3. calls [`ContextualCheckBlockHeader`] for difficulty and time rules.
+    ///
+    /// Floresta's `accept_header` handles duplicates and storage, while this helper
+    /// performs the corresponding validation.
+    ///
+    /// [`AcceptBlockHeader`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp#L4218-L4271
+    /// [`CheckBlockHeader`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp#L3860-L3867
+    /// [`CheckProofOfWork`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/pow.cpp#L140-L144
+    /// [`ContextualCheckBlockHeader`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp#L4112-L4153
     fn validate_header(
         &self,
-        block_header: &BlockHeader,
+        header: &BlockHeader,
         current_time: u32,
     ) -> Result<BlockHash, BlockchainError> {
-        let prev_block = self.get_disk_block_header(&block_header.prev_blockhash)?;
-        let height = prev_block
+        let params = self.chain_params().params;
+
+        // CheckBlockHeader: decode the claimed target like Core's DeriveTarget, then check
+        // the actual PoW against it.
+        let target = Consensus::derive_target(header.bits, params.max_attainable_target)?;
+
+        let hash = header
+            .validate_pow(target)
+            .map_err(|_| BlockValidationErrors::NotEnoughPow)?;
+
+        // AcceptBlockHeader: resolve the parent.
+        let prev = self.get_disk_block_header(&header.prev_blockhash)?;
+        let height = prev
             .height()
             .ok_or(BlockValidationErrors::BlockExtendsAnOrphanChain)?
             + 1;
 
-        // Check pow
-        let expected_target = self.get_next_required_work(&prev_block, height, block_header)?;
-
-        let actual_target = block_header.target();
-        if actual_target > expected_target {
-            Err(BlockValidationErrors::NotEnoughPow)?;
+        // ContextualCheckBlockHeader: nBits → MTP → BIP94 → future time → outdated version.
+        let expected_target = self.get_next_required_work(&prev, height, header)?;
+        if header.bits != expected_target.to_compact_lossy() {
+            Err(BlockValidationErrors::BadDiffBits)?;
         }
 
-        let previous_mtp = self.median_time_past(*prev_block)?;
-        if block_header.time <= previous_mtp {
+        if header.time <= self.median_time_past(*prev)? {
             Err(BlockValidationErrors::TimeTooOld)?;
         }
 
-        self.check_bip94_block(block_header, height)?;
+        self.check_bip94_block(header, height)?;
 
-        // Check time
-        if u64::from(block_header.time) > u64::from(current_time) + u64::from(MAX_FUTURE_BLOCK_TIME)
-        {
-            Err(BlockValidationErrors::TimeTooNew(block_header.block_hash()))?;
+        if u64::from(header.time) > u64::from(current_time) + u64::from(MAX_FUTURE_BLOCK_TIME) {
+            Err(BlockValidationErrors::TimeTooNew(hash))?;
         }
 
-        let block_hash = block_header
-            .validate_pow(actual_target)
-            .map_err(|_| BlockValidationErrors::NotEnoughPow)?;
-        Ok(block_hash)
+        // Reject versions deprecated by the BIP34, BIP66 and BIP65 soft forks.
+        let version = header.version.to_consensus();
+        if (version < 2 && height >= params.bip34_height)
+            || (version < 3 && height >= params.bip66_height)
+            || (version < 4 && height >= params.bip65_height)
+        {
+            Err(BlockValidationErrors::BadBlockVersion(version))?;
+        }
+
+        Ok(hash)
     }
 
     #[inline]
@@ -972,8 +998,14 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
     pub fn acc(&self) -> Stump {
         read_lock!(self).acc.to_owned()
     }
-    /// Returns the next required work for the next block, usually it's just the last block's target
-    /// but if we are in a retarget period, it's calculated from the last 2016 blocks.
+
+    /// Returns the required target for the next block, matching Core's [`GetNextWorkRequired`].
+    ///
+    /// Usually it's just the last block's target, but on a retarget height it's recalculated
+    /// from the last 2016 blocks, and networks allowing min-difficulty blocks follow the
+    /// special 20-minute rule for non-retarget heights.
+    ///
+    /// [`GetNextWorkRequired`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/pow.cpp#L14-L48
     fn get_next_required_work(
         &self,
         last_block: &BlockHeader,
@@ -981,31 +1013,46 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         next_header: &BlockHeader,
     ) -> Result<Target, BlockchainError> {
         let params: ChainParams = self.chain_params();
-        // Special testnet rule, if a block takes more than 20 minutes to mine, we can
-        // mine a block with diff 1
-        if params.params.allow_min_difficulty_blocks
-            && last_block.time + params.params.pow_target_spacing as u32 * 2 < next_header.time
-        {
-            return Ok(params.params.max_attainable_target);
-        }
+        let spacing = params.params.pow_target_spacing;
+        let interval = (params.params.pow_target_timespan / spacing) as u32;
 
-        // Regtest don't have retarget
-        if !params.params.no_pow_retargeting && (next_height) % 2016 == 0 {
-            // First block in this epoch
-            let first_block = self.get_header_by_height(next_height - 2016)?;
-            let last_block = self.get_header_by_height(next_height - 1)?;
+        // The target only changes once per difficulty adjustment interval
+        if next_height % interval != 0 {
+            if params.params.allow_min_difficulty_blocks {
+                // Special testnet rule: if a block takes more than 20 minutes to mine, it
+                // must use the minimum difficulty
+                if u64::from(next_header.time) > u64::from(last_block.time) + spacing * 2 {
+                    return Ok(params.params.max_attainable_target);
+                }
 
-            let target =
-                Consensus::calc_next_work_required(&last_block, &first_block, self.chain_params());
+                // Otherwise, require the target of the last block that isn't a
+                // special-min-difficulty-rules block
+                let limit_bits = params.params.max_attainable_target.to_compact_lossy();
+                let mut height = next_height - 1;
+                let mut header = *last_block;
 
-            if target < params.params.max_attainable_target {
-                return Ok(target);
+                while height % interval != 0 && header.bits == limit_bits {
+                    header = *self.get_ancestor(&header)?;
+                    height -= 1;
+                }
+
+                return Ok(header.target());
             }
 
-            return Ok(params.params.max_attainable_target);
+            return Ok(last_block.target());
         }
 
-        Ok(last_block.target())
+        // Retarget from the first and last blocks of the ending epoch. This already returns
+        // the last block's target if `no_pow_retargeting`, and otherwise clamps the result
+        // to the pow limit and rounds it through the compact encoding, like Core.
+        let first_block = self.get_header_by_height(next_height - interval)?;
+        let last_block = self.get_header_by_height(next_height - 1)?;
+
+        Ok(Consensus::calc_next_work_required(
+            &last_block,
+            &first_block,
+            params,
+        ))
     }
 
     /// Check timestamp against prev for difficulty-adjustment blocks to prevent timewarp attacks.
@@ -1574,6 +1621,7 @@ mod test {
     use bitcoin::OutPoint;
     use bitcoin::ScriptBuf;
     use bitcoin::Sequence;
+    use bitcoin::Target;
     use bitcoin::Transaction;
     use bitcoin::TxMerkleNode;
     use bitcoin::Work;
@@ -1597,6 +1645,7 @@ mod test {
     use super::BlockchainInterface;
     use super::ChainParams;
     use super::ChainState;
+    use super::ChainStateBuilder;
     use super::DiskBlockHeader;
     use super::UpdatableChainstate;
     use crate::AssumeValidArg;
@@ -1617,14 +1666,13 @@ mod test {
     const TEST_FORK_FILE_SIZE: usize = 10_000;
     const EASIEST_REGTEST_TARGET_BITS: u32 = 0x207f_ffff;
 
+    // A valid target slightly harder than the regtest pow limit, still trivial to grind.
+    const HARD_REGTEST_TARGET_BITS: u32 = 0x207f_fffe;
+
     // A mock timestamp high enough so time checks dont bother unrelated tests.
     const MOCK_TIME: u32 = u32::MAX;
 
-    fn setup_test_chain(
-        network: Network,
-        assume_valid_arg: AssumeValidArg,
-        header_capacity: Option<usize>,
-    ) -> ChainState<FlatChainStore> {
+    fn test_chainstore(header_capacity: Option<usize>) -> FlatChainStore {
         let test_id = rand::random::<u64>();
         let capacity = header_capacity.unwrap_or(DEFAULT_TEST_CHAINSTORE_SIZE);
         let config = FlatChainStoreConfig {
@@ -1636,8 +1684,28 @@ mod test {
             path: format!("./tmp-db/{test_id}/").into(),
         };
 
-        let chainstore = FlatChainStore::new(config).unwrap();
+        FlatChainStore::new(config).unwrap()
+    }
+
+    fn setup_test_chain(
+        network: Network,
+        assume_valid_arg: AssumeValidArg,
+        header_capacity: Option<usize>,
+    ) -> ChainState<FlatChainStore> {
+        let chainstore = test_chainstore(header_capacity);
         ChainState::open(chainstore, network, assume_valid_arg).unwrap()
+    }
+
+    /// Creates a chain state with the given (possibly tweaked) parameters, storing genesis.
+    fn setup_chain_with_params(params: ChainParams) -> ChainState<FlatChainStore> {
+        let genesis = params.genesis.clone();
+
+        ChainStateBuilder::new()
+            .with_chainstore(test_chainstore(None))
+            .with_chain_params(params)
+            .with_tip((genesis.block_hash(), 0), genesis.header)
+            .build()
+            .unwrap()
     }
 
     fn anyone_can_spend_script() -> ScriptBuf {
@@ -2062,6 +2130,444 @@ mod test {
         });
 
         assert_ok!(chain.accept_header(header, u32::MAX));
+    }
+
+    /// Stores one synthetic header per `(time, bits)` pair, ending at `tip_height` and
+    /// linking back to the genesis hash. Returns the stored headers.
+    fn store_headers_with_bits(
+        chain: &ChainState<FlatChainStore>,
+        tip_height: u32,
+        spec: &[(u32, u32)],
+    ) -> Vec<BlockHeader> {
+        let genesis = genesis_block(Network::Regtest);
+        let start_height = tip_height + 1 - spec.len() as u32;
+        let mut prev_hash = genesis.block_hash();
+        let mut headers = Vec::with_capacity(spec.len());
+
+        for (offset, &(time, bits)) in spec.iter().enumerate() {
+            let height = start_height + offset as u32;
+            let header = BlockHeader {
+                version: HeaderVersion::TWO,
+                prev_blockhash: prev_hash,
+                merkle_root: genesis.header.merkle_root,
+                time,
+                bits: CompactTarget::from_consensus(bits),
+                nonce: height,
+            };
+            prev_hash = header.block_hash();
+
+            write_lock!(chain)
+                .chainstore
+                .save_header(&DiskBlockHeader::FullyValid(header, height))
+                .unwrap();
+            write_lock!(chain)
+                .chainstore
+                .update_block_index(height, prev_hash)
+                .unwrap();
+            headers.push(header);
+        }
+
+        headers
+    }
+
+    /// Builds a ground candidate header on top of `prev_hash`.
+    fn header_on(prev_hash: BlockHash, time: u32, bits: u32, version: i32) -> BlockHeader {
+        grind_pow(BlockHeader {
+            version: HeaderVersion::from_consensus(version),
+            prev_blockhash: prev_hash,
+            merkle_root: genesis_block(Network::Regtest).header.merkle_root,
+            time,
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        })
+    }
+
+    #[test]
+    fn derive_target_rejects_invalid_compact_encodings() {
+        let regtest_limit = ChainParams::from(Network::Regtest)
+            .params
+            .max_attainable_target;
+        let mainnet_limit = ChainParams::from(Network::Bitcoin)
+            .params
+            .max_attainable_target;
+
+        let derive =
+            |bits: u32, limit| Consensus::derive_target(CompactTarget::from_consensus(bits), limit);
+        let rejects = |bits: u32, limit| {
+            assert!(
+                matches!(
+                    derive(bits, limit),
+                    Err(BlockValidationErrors::NotEnoughPow)
+                ),
+                "{bits:#010x} must be rejected"
+            );
+        };
+
+        // Negative: the mantissa sign bit is set
+        rejects(0x0380_8000, regtest_limit);
+        // Zero: no mantissa bits (a set sign bit alone is still a zero value)
+        rejects(0x0000_0000, regtest_limit);
+        rejects(0x0300_0000, regtest_limit);
+        rejects(0x0180_0000, regtest_limit);
+        rejects(0x0280_0001, regtest_limit); // mantissa shifted out by the low exponent
+        // Overflow: the value doesn't fit in 256 bits
+        rejects(0x2300_0001, regtest_limit);
+        rejects(0x2201_0000, regtest_limit);
+        rejects(0xff7f_ffff, regtest_limit);
+        // In range for 256 bits, but above the network pow limit
+        rejects(0x2100_ffff, regtest_limit);
+        rejects(0x1d01_0000, mainnet_limit);
+
+        // `Target::from_compact` wraps the 2016-bit mantissa shift of `0xff7fffff` down to
+        // 224 bits, decoding an in-range regtest target out of an encoding that Core rejects
+        // as an overflow. This is why `derive_target` must check the raw encoding.
+        let wrapped = Target::from_compact(CompactTarget::from_consensus(0xff7f_ffff));
+        assert_eq!(
+            wrapped,
+            Target::from_compact(CompactTarget::from_consensus(0x1f7f_ffff))
+        );
+        assert!(wrapped != Target::ZERO && wrapped < regtest_limit);
+
+        // `Target::from_compact` also shifts the sign bit into the value for exponents below
+        // 3, decoding a target of 128 out of `0x01800000`, which Core decodes as a zero value
+        assert_eq!(
+            Target::from_compact(CompactTarget::from_consensus(0x0180_0000)),
+            Target::from_compact(CompactTarget::from_consensus(0x0300_0080))
+        );
+
+        // Valid encodings decode exactly
+        assert_eq!(
+            derive(EASIEST_REGTEST_TARGET_BITS, regtest_limit).unwrap(),
+            regtest_limit
+        );
+        assert_eq!(derive(0x1d00_ffff, mainnet_limit).unwrap(), mainnet_limit);
+        assert_ok!(derive(HARD_REGTEST_TARGET_BITS, regtest_limit));
+        assert_eq!(
+            derive(0x0112_3456, regtest_limit).unwrap(),
+            Target::from_compact(CompactTarget::from_consensus(0x0300_0012))
+        );
+    }
+
+    #[test]
+    fn accept_header_rejects_overflowing_target() {
+        // The compact target overflows 256 bits, but `Target::from_compact` wraps it into an
+        // in-range regtest target. Grind the header against that wrapped target to prove the
+        // rejection comes from the encoding check, and not from failing the PoW or nBits ones.
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+
+        let header = header_on(
+            genesis.block_hash(),
+            genesis.header.time + 600,
+            0xff7f_ffff,
+            2,
+        );
+
+        assert!(matches!(
+            chain.accept_header(header, MOCK_TIME),
+            Err(BlockchainError::BlockValidation(
+                BlockValidationErrors::NotEnoughPow
+            ))
+        ));
+    }
+
+    #[test]
+    fn accept_header_rejects_insufficient_pow() {
+        // A valid target, but the header hash doesn't meet it
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+
+        let mut header = BlockHeader {
+            version: HeaderVersion::TWO,
+            prev_blockhash: genesis.block_hash(),
+            merkle_root: genesis.header.merkle_root,
+            time: genesis.header.time + 600,
+            bits: CompactTarget::from_consensus(EASIEST_REGTEST_TARGET_BITS),
+            nonce: 0,
+        };
+        while header.validate_pow(header.target()).is_ok() {
+            header.nonce += 1;
+        }
+
+        assert!(matches!(
+            chain.accept_header(header, MOCK_TIME),
+            Err(BlockchainError::BlockValidation(
+                BlockValidationErrors::NotEnoughPow
+            ))
+        ));
+    }
+
+    #[test]
+    fn accept_header_rejects_wrong_diff_bits() {
+        // The header must commit to the exact required compact target, so a valid and even
+        // harder-than-required target is rejected
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+
+        let header = header_on(
+            genesis.block_hash(),
+            genesis.header.time + 600,
+            HARD_REGTEST_TARGET_BITS,
+            2,
+        );
+
+        assert!(matches!(
+            chain.accept_header(header, MOCK_TIME),
+            Err(BlockchainError::BlockValidation(
+                BlockValidationErrors::BadDiffBits
+            ))
+        ));
+    }
+
+    #[test]
+    fn accept_header_rejects_orphan_and_missing_parents() {
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+
+        // The parent is not in our store at all
+        let unknown_parent = BlockHash::all_zeros();
+        let header = header_on(
+            unknown_parent,
+            genesis.header.time + 600,
+            EASIEST_REGTEST_TARGET_BITS,
+            2,
+        );
+        assert!(matches!(
+            chain.accept_header(header, MOCK_TIME),
+            Err(BlockchainError::BlockNotPresent)
+        ));
+
+        // The parent is a stored orphan, i.e. a header without a known height
+        let orphan_parent = BlockHeader {
+            version: HeaderVersion::TWO,
+            prev_blockhash: unknown_parent,
+            merkle_root: genesis.header.merkle_root,
+            time: genesis.header.time + 600,
+            bits: CompactTarget::from_consensus(EASIEST_REGTEST_TARGET_BITS),
+            nonce: 0,
+        };
+        write_lock!(chain)
+            .chainstore
+            .save_header(&DiskBlockHeader::Orphan(orphan_parent))
+            .unwrap();
+
+        let header = header_on(
+            orphan_parent.block_hash(),
+            genesis.header.time + 1200,
+            EASIEST_REGTEST_TARGET_BITS,
+            2,
+        );
+        assert!(matches!(
+            chain.accept_header(header, MOCK_TIME),
+            Err(BlockchainError::BlockValidation(
+                BlockValidationErrors::BlockExtendsAnOrphanChain
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_header_enforces_min_difficulty_rules() {
+        // A chain of 11 headers harder than the pow limit, spaced 10 minutes apart
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+        let spec: Vec<(u32, u32)> = (1..=11)
+            .map(|i| (genesis.header.time + i * 600, HARD_REGTEST_TARGET_BITS))
+            .collect();
+        let tip = *store_headers_with_bits(&chain, 11, &spec).last().unwrap();
+        let tip_hash = tip.block_hash();
+
+        let assert_bad_diff_bits = |header: &BlockHeader| {
+            assert!(matches!(
+                chain.validate_header(header, MOCK_TIME),
+                Err(BlockchainError::BlockValidation(
+                    BlockValidationErrors::BadDiffBits
+                ))
+            ));
+        };
+
+        // Within 20 minutes of the parent, the required target is the parent's (the walk-back
+        // stops right at it, as its bits differ from the pow limit ones)
+        let slow = tip.time + 1200;
+        assert_bad_diff_bits(&header_on(tip_hash, slow, EASIEST_REGTEST_TARGET_BITS, 2));
+        assert_ok!(chain.validate_header(
+            &header_on(tip_hash, slow, HARD_REGTEST_TARGET_BITS, 2),
+            MOCK_TIME,
+        ));
+
+        // Past 20 minutes, the header must use the minimum difficulty instead
+        let too_slow = tip.time + 1201;
+        assert_bad_diff_bits(&header_on(tip_hash, too_slow, HARD_REGTEST_TARGET_BITS, 2));
+        assert_ok!(chain.validate_header(
+            &header_on(tip_hash, too_slow, EASIEST_REGTEST_TARGET_BITS, 2),
+            MOCK_TIME,
+        ));
+    }
+
+    #[test]
+    fn next_work_walks_back_over_min_difficulty_blocks() {
+        // Heights 1-5 use a harder-than-limit target, heights 6-11 are min-difficulty blocks
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+        let genesis = genesis_block(Network::Regtest);
+        let spec: Vec<(u32, u32)> = (1..=11)
+            .map(|i| {
+                let bits = if i <= 5 {
+                    HARD_REGTEST_TARGET_BITS
+                } else {
+                    EASIEST_REGTEST_TARGET_BITS
+                };
+                (genesis.header.time + i * 600, bits)
+            })
+            .collect();
+        let tip = *store_headers_with_bits(&chain, 11, &spec).last().unwrap();
+
+        let candidate = |time| BlockHeader {
+            version: HeaderVersion::TWO,
+            prev_blockhash: tip.block_hash(),
+            merkle_root: genesis.header.merkle_root,
+            time,
+            bits: CompactTarget::from_consensus(EASIEST_REGTEST_TARGET_BITS),
+            nonce: 0,
+        };
+
+        // Within 20 minutes, the walk-back skips the min-difficulty headers 11 through 6 and
+        // requires the target of header 5
+        let required = chain
+            .get_next_required_work(&tip, 12, &candidate(tip.time + 1200))
+            .unwrap();
+        assert_eq!(
+            required.to_compact_lossy().to_consensus(),
+            HARD_REGTEST_TARGET_BITS
+        );
+
+        // Past 20 minutes, the minimum difficulty is required directly
+        let required = chain
+            .get_next_required_work(&tip, 12, &candidate(tip.time + 1201))
+            .unwrap();
+        assert_eq!(
+            required.to_compact_lossy().to_consensus(),
+            EASIEST_REGTEST_TARGET_BITS
+        );
+    }
+
+    #[test]
+    fn next_work_retargets_at_interval_heights() {
+        // Regtest parameters with retargeting enabled, so we can grind the easy pow limit
+        let mut params = ChainParams::from(Network::Regtest);
+        params.params.no_pow_retargeting = false;
+        let chain = setup_chain_with_params(params.clone());
+
+        // The ending epoch spans exactly one pow_target_timespan, keeping the target unchanged.
+        // The target must be far below the pow limit, or the retarget arithmetic overflows.
+        let genesis_time = params.genesis.header.time;
+        let epoch_time = genesis_time + params.params.pow_target_timespan as u32;
+        let tip = *store_headers_with_bits(&chain, 2015, &[(epoch_time, 0x1e00_ffff)])
+            .last()
+            .unwrap();
+
+        // Even on a min-difficulty network with a 20-minute gap, a retarget height must use
+        // the recalculated epoch target, not the minimum difficulty
+        let candidate = BlockHeader {
+            version: HeaderVersion::TWO,
+            prev_blockhash: tip.block_hash(),
+            merkle_root: params.genesis.header.merkle_root,
+            time: epoch_time + 99_999,
+            bits: CompactTarget::from_consensus(EASIEST_REGTEST_TARGET_BITS),
+            nonce: 0,
+        };
+        let required = chain
+            .get_next_required_work(&tip, 2016, &candidate)
+            .unwrap();
+        assert_eq!(required.to_compact_lossy().to_consensus(), 0x1e00_ffff);
+
+        // One block later the height is no longer a retarget one, so the same gap now
+        // triggers the min-difficulty exception
+        let required = chain
+            .get_next_required_work(&tip, 2017, &candidate)
+            .unwrap();
+        assert_eq!(
+            required.to_compact_lossy().to_consensus(),
+            EASIEST_REGTEST_TARGET_BITS
+        );
+    }
+
+    #[test]
+    fn validate_header_rejects_bip94_timewarp() {
+        // Regtest parameters with BIP94 enforced; its difficulty adjustment window is 144
+        let mut params = ChainParams::from(Network::Regtest);
+        params.enforce_bip94 = true;
+        let chain = setup_chain_with_params(params.clone());
+
+        // Headers 133-142 share a time well behind header 143, keeping the MTP low enough
+        // for a candidate that warps time before its parent
+        let base_time = params.genesis.header.time + 10_000;
+        let tip_time = base_time + 2000;
+        let mut spec = vec![(base_time, HARD_REGTEST_TARGET_BITS); 10];
+        spec.push((tip_time, HARD_REGTEST_TARGET_BITS));
+        let tip = *store_headers_with_bits(&chain, 143, &spec).last().unwrap();
+        let tip_hash = tip.block_hash();
+
+        // Header 144 starts a difficulty adjustment window, so its time must not be more
+        // than 600 seconds behind its parent
+        let candidate = header_on(tip_hash, tip_time - 601, HARD_REGTEST_TARGET_BITS, 2);
+        assert!(matches!(
+            chain.validate_header(&candidate, MOCK_TIME),
+            Err(BlockchainError::BlockValidation(
+                BlockValidationErrors::BIP94TimeWarp
+            ))
+        ));
+
+        // Exactly 600 seconds behind is still valid
+        let candidate = header_on(tip_hash, tip_time - 600, HARD_REGTEST_TARGET_BITS, 2);
+        assert_ok!(chain.validate_header(&candidate, MOCK_TIME));
+    }
+
+    #[test]
+    fn accept_header_rejects_outdated_versions() {
+        // Regtest parameters with early activation heights for BIP34, BIP66 and BIP65
+        let mut params = ChainParams::from(Network::Regtest);
+        params.params.bip34_height = 2;
+        params.params.bip66_height = 3;
+        params.params.bip65_height = 4;
+        let chain = setup_chain_with_params(params.clone());
+
+        let genesis_time = params.genesis.header.time;
+
+        // Height 1 precedes every activation, so version 1 is still valid there
+        let first = header_on(
+            params.genesis.block_hash(),
+            genesis_time + 600,
+            EASIEST_REGTEST_TARGET_BITS,
+            1,
+        );
+        chain.accept_header(first, MOCK_TIME).unwrap();
+        let mut prev_hash = first.block_hash();
+
+        // From each activation height onwards, the previous version is outdated
+        for (height, outdated_version) in [(2u32, 1i32), (3, 2), (4, 3)] {
+            let time = genesis_time + height * 600;
+
+            let outdated = header_on(
+                prev_hash,
+                time,
+                EASIEST_REGTEST_TARGET_BITS,
+                outdated_version,
+            );
+            assert!(matches!(
+                chain.accept_header(outdated, MOCK_TIME),
+                Err(BlockchainError::BlockValidation(
+                    BlockValidationErrors::BadBlockVersion(version)
+                )) if version == outdated_version
+            ));
+
+            let valid = header_on(
+                prev_hash,
+                time,
+                EASIEST_REGTEST_TARGET_BITS,
+                outdated_version + 1,
+            );
+            chain.accept_header(valid, MOCK_TIME).unwrap();
+            prev_hash = valid.block_hash();
+        }
     }
 
     #[test]

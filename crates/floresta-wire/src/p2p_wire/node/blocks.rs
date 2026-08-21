@@ -363,6 +363,8 @@ where
             | BlockValidationErrors::ScriptError
             | BlockValidationErrors::BlockTooBig
             | BlockValidationErrors::NotEnoughPow
+            | BlockValidationErrors::BadDiffBits
+            | BlockValidationErrors::BadBlockVersion(_)
             | BlockValidationErrors::TooManyCoins
             | BlockValidationErrors::NotEnoughMoney
             | BlockValidationErrors::FirstTxIsNotCoinbase
