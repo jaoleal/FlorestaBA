@@ -1237,7 +1237,14 @@ impl<PersistedState: ChainStore> BlockchainInterface for ChainState<PersistedSta
     fn get_validation_index(&self) -> Result<u32, Self::Error> {
         let inner = self.inner.read();
         let validation = inner.best_block.validation_index;
-        let header = self.get_disk_block_header(&validation)?;
+
+        // Read the header through the guard we already hold. Going through
+        // `get_disk_block_header` would take the lock a second time, keeping a
+        // reader around for longer and making any writer spin for it.
+        let header = inner
+            .chainstore
+            .get_header(&validation)?
+            .ok_or(BlockchainError::BlockNotPresent)?;
         // The last validated disk header can only be FullyValid
         if let DiskBlockHeader::FullyValid(_, height) = header {
             return Ok(height);
