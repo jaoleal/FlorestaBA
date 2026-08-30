@@ -1,0 +1,290 @@
+diff --git a/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
+index 65f8ce02..3fcaa272 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
+@@ -773,8 +773,19 @@ where
+ 
+         let peer = self.send_to_fast_peer(NodeRequest::GetHeaders(locator), ServiceFlags::NONE)?;
+ 
+-        self.inflight
++        let prev = self
++            .inflight
+             .insert(InflightRequests::Headers, (peer, Instant::now()));
++        match prev {
++            Some((old_peer, old_time)) => warn!(
++                "HEADERS-SINGLETON overwrite: header-sync request to peer={peer} clobbered \
++                 pending getheaders to peer={old_peer} (age={:?}).",
++                old_time.elapsed()
++            ),
++            None => info!(
++                "HEADERS-SINGLETON insert: header-sync tracking getheaders to peer={peer}"
++            ),
++        }
+ 
+         Ok(())
+     }
+@@ -955,6 +966,15 @@ where
+ 
+             for inflight in self.inflight.clone().iter() {
+                 if inflight.1.1.elapsed().as_secs() > 60 {
++                    if matches!(inflight.0, InflightRequests::Headers) {
++                        warn!(
++                            "HEADERS-SINGLETON sweep-remove: utreexo-state loop silently \
++                             dropped the headers entry tracking peer={} (age={:?}); NO retry \
++                             follows this path.",
++                            inflight.1.0,
++                            inflight.1.1.elapsed()
++                        );
++                    }
+                     self.inflight.remove(inflight.0);
+                 }
+             }
+@@ -1015,7 +1035,18 @@ where
+ 
+         match unhandled {
+             PeerMessages::Headers(headers) => {
+-                self.inflight.remove(&InflightRequests::Headers);
++                match self.inflight.remove(&InflightRequests::Headers) {
++                    Some((tracked_peer, _)) if tracked_peer == peer => {}
++                    Some((tracked_peer, time)) => warn!(
++                        "HEADERS-SINGLETON wrong-peer-remove (sync): headers from peer={peer} \
++                         wiped the entry tracking peer={tracked_peer} (age={:?}).",
++                        time.elapsed()
++                    ),
++                    None => warn!(
++                        "HEADERS-SINGLETON unsolicited (sync): headers from peer={peer} with \
++                         no inflight entry."
++                    ),
++                }
+                 return self.handle_headers(peer, headers).await;
+             }
+ 
+diff --git a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+index 4a913e53..bc7077a1 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+@@ -273,8 +273,20 @@ where
+             let locator = self.chain.get_block_locator()?;
+             self.send_to_peer(peer, NodeRequest::GetHeaders(locator))?;
+ 
+-            self.inflight
++            let prev = self
++                .inflight
+                 .insert(InflightRequests::Headers, (peer, Instant::now()));
++            match prev {
++                Some((old_peer, old_time)) => warn!(
++                    "HEADERS-SINGLETON overwrite: extra-peer handshake (peer={peer}) clobbered \
++                     pending getheaders to peer={old_peer} (age={:?}). That request is now \
++                     untracked: no timeout, no banscore, no retry.",
++                    old_time.elapsed()
++                ),
++                None => info!(
++                    "HEADERS-SINGLETON insert: extra-peer handshake tracking getheaders to peer={peer}"
++                ),
++            }
+ 
+             return Ok(());
+         }
+@@ -516,6 +528,14 @@ where
+         for req in inflight {
+             self.inflight.remove(&req.0);
+ 
++            if matches!(req.0, InflightRequests::Headers) {
++                warn!(
++                    "HEADERS-SINGLETON disconnect-remove: peer={peer} disconnected holding \
++                     the headers entry (age={:?}); redo_inflight_request re-issues it next.",
++                    req.1.1.elapsed()
++                );
++            }
++
+             if let Err(e) = self.redo_inflight_request(&req.0) {
+                 // CRITICAL: never drop the request, so we retry it later
+                 self.inflight.insert(req.0, req.1);
+@@ -625,6 +645,15 @@ where
+                 continue;
+             };
+ 
++            if matches!(req, InflightRequests::Headers) {
++                warn!(
++                    "HEADERS-SINGLETON timeout-remove: getheaders to peer={peer} timed out \
++                     (age={:?}); banscore and timeout-retry follow. If a collision wiped and \
++                     re-inserted the entry meanwhile, this may punish the wrong peer.",
++                    time.elapsed()
++                );
++            }
++
+             // If a feeler connection times out, we ban them at the first message
+             if let Some(peer_data) = self.peers.get(&peer) {
+                 if peer_data.kind == ConnectionKind::Feeler {
+@@ -719,6 +748,10 @@ where
+                 let peer =
+                     self.send_to_fast_peer(NodeRequest::GetHeaders(locator), ServiceFlags::NONE)?;
+ 
++                warn!(
++                    "HEADERS-SINGLETON timeout-retry: re-requesting headers from peer={peer}. \
++                     If more than one logical getheaders was pending, only this one is reborn."
++                );
+                 self.inflight
+                     .insert(InflightRequests::Headers, (peer, Instant::now()));
+             }
+@@ -807,6 +840,14 @@ where
+ 
+             PeerMessages::Headers(_) => {
+                 let inflight = self.inflight.get(&InflightRequests::Headers)?;
++                if inflight.0 != peer {
++                    warn!(
++                        "HEADERS-SINGLETON dirty-latency: headers from peer={peer} being timed \
++                         against the Instant of a request sent to peer={}. This poisons \
++                         message_times and fast-peer selection.",
++                        inflight.0
++                    );
++                }
+                 inflight.1
+             }
+ 
+diff --git a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+index da5d6ddd..d392d84c 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+@@ -439,6 +439,23 @@ where
+         // Check if some of our peers have timed out a request
+         try_and_log!(self.check_for_timeout());
+ 
++        // HDR-MAP snapshot: the node's *belief* about the Headers singleton, stamped every
++        // tick so an offline parser can reconcile it against the HDR-WIRE ledger. This is the
++        // buggy projection; the wire ledger is ground truth.
++        {
++            let now_ms = std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .map(|d| d.as_millis())
++                .unwrap_or(0);
++            match self.inflight.get(&InflightRequests::Headers) {
++                Some((peer, since)) => info!(
++                    "HDR-MAP snapshot ts={now_ms} believes=peer{peer} age_ms={}",
++                    since.elapsed().as_millis()
++                ),
++                None => info!("HDR-MAP snapshot ts={now_ms} believes=none"),
++            }
++        }
++
+         // Open new feeler connection periodically
+         periodic_job!(
+             self.last_feeler => self.open_feeler_connection(),
+@@ -601,15 +618,28 @@ where
+         // until we get a new block.
+         self.last_tip_update = Instant::now();
+         self.create_connection(ConnectionKind::Extra)?;
+-        self.send_to_random_peer(
++        let random_peer = self.send_to_random_peer(
+             NodeRequest::GetHeaders(self.chain.get_block_locator().unwrap()),
+             ServiceFlags::NONE,
+         )?;
++        warn!(
++            "HEADERS-SINGLETON orphan-request: stale-tip handler sent getheaders to random \
++             peer={random_peer} with NO inflight entry. Born untracked (no timeout possible); \
++             its response will wipe whatever entry exists — likely the extra-peer's, inserted \
++             moments from now on handshake."
++        );
+         Ok(())
+     }
+ 
+     fn handle_new_block(&mut self, block: BlockHash, peer: u32) -> Result<(), WireError> {
+-        if self.inflight.contains_key(&InflightRequests::Headers) {
++        if let Some((tracked_peer, time)) = self.inflight.get(&InflightRequests::Headers) {
++            info!(
++                "HEADERS-SINGLETON guard-hit: skipping getheaders for new block {block} \
++                 (inv from peer={peer}) because the singleton is held by peer={tracked_peer} \
++                 (age={:?}). If that entry is stale/orphaned, this block is being blocked \
++                 by a ghost.",
++                time.elapsed()
++            );
+             return Ok(());
+         }
+ 
+@@ -620,6 +650,10 @@ where
+         let locator = self.chain.get_block_locator().unwrap();
+         self.send_to_peer(peer, NodeRequest::GetHeaders(locator))?;
+ 
++        info!(
++            "HEADERS-SINGLETON insert: new-block handler tracking getheaders to peer={peer} \
++             for block {block}"
++        );
+         self.inflight
+             .insert(InflightRequests::Headers, (peer, Instant::now()));
+ 
+@@ -707,7 +741,25 @@ where
+                             "Got headers from peer {peer} with {} headers",
+                             headers.len()
+                         );
+-                        self.inflight.remove(&InflightRequests::Headers);
++                        match self.inflight.remove(&InflightRequests::Headers) {
++                            Some((tracked_peer, time)) if tracked_peer == peer => info!(
++                                "HEADERS-SINGLETON clean-remove: headers from peer={peer} \
++                                 matched the tracked request (rtt={:?})",
++                                time.elapsed()
++                            ),
++                            Some((tracked_peer, time)) => warn!(
++                                "HEADERS-SINGLETON wrong-peer-remove: headers from peer={peer} \
++                                 wiped the entry tracking peer={tracked_peer} (age={:?}). The \
++                                 request to peer={tracked_peer} is now untracked: no timeout, \
++                                 no banscore, no retry.",
++                                time.elapsed()
++                            ),
++                            None => warn!(
++                                "HEADERS-SINGLETON unsolicited: headers from peer={peer} with \
++                                 no inflight entry — likely a BIP130 block announcement, or \
++                                 the entry was already wiped by an earlier collision."
++                            ),
++                        }
+ 
+                         let peer_info = self.peers.get(&peer).cloned().expect("Peer not found");
+                         let is_extra = matches!(peer_info.kind, ConnectionKind::Extra);
+diff --git a/crates/floresta-wire/src/p2p_wire/node_context.rs b/crates/floresta-wire/src/p2p_wire/node_context.rs
+index cfc49119..a4b7d003 100644
+--- a/crates/floresta-wire/src/p2p_wire/node_context.rs
++++ b/crates/floresta-wire/src/p2p_wire/node_context.rs
+@@ -49,7 +49,7 @@ pub trait NodeContext {
+     const TRY_NEW_CONNECTION: u64 = 10; // 10 seconds
+ 
+     /// If ASSUME_STALE seconds passed since our last tip update, treat it as stale
+-    const ASSUME_STALE: u64 = 15 * 60; // 15 minutes
++    const ASSUME_STALE: u64 = 5 * 60; // DIAGNOSTIC: lowered from 15min to provoke stale-tip
+ 
+     /// While on IBD, if we've been without blocks for this long, ask for headers again
+     const IBD_REQUEST_BLOCKS_AGAIN: u64 = 30; // 30 seconds
+diff --git a/crates/floresta-wire/src/p2p_wire/peer.rs b/crates/floresta-wire/src/p2p_wire/peer.rs
+index f384652f..254ea2d4 100644
+--- a/crates/floresta-wire/src/p2p_wire/peer.rs
++++ b/crates/floresta-wire/src/p2p_wire/peer.rs
+@@ -385,6 +385,15 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+                 let _ = self.write(NetworkMessage::GetCFilters(get_filter)).await;
+             }
+             NodeRequest::GetHeaders(locator) => {
++                debug!(
++                    "HDR-WIRE send peer={} ts={} locator_tip={}",
++                    self.id,
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .map(|d| d.as_millis())
++                        .unwrap_or(0),
++                    locator.first().map(|h| h.to_string()).unwrap_or_default()
++                );
+                 let _ = self
+                     .write(NetworkMessage::GetHeaders(
+                         bitcoin::p2p::message_blockdata::GetHeadersMessage {
+@@ -503,6 +512,15 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+                     self.write(NetworkMessage::Headers(Vec::new())).await?;
+                 }
+                 NetworkMessage::Headers(headers) => {
++                    debug!(
++                        "HDR-WIRE recv peer={} ts={} count={}",
++                        self.id,
++                        std::time::SystemTime::now()
++                            .duration_since(std::time::UNIX_EPOCH)
++                            .map(|d| d.as_millis())
++                            .unwrap_or(0),
++                        headers.len()
++                    );
+                     self.send_to_node(PeerMessages::Headers(headers), time);
+                 }
+                 NetworkMessage::SendHeaders => {

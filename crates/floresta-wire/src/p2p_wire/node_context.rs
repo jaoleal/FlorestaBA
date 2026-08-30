@@ -49,7 +49,7 @@ pub trait NodeContext {
     const TRY_NEW_CONNECTION: u64 = 10; // 10 seconds
 
     /// If ASSUME_STALE seconds passed since our last tip update, treat it as stale
-    const ASSUME_STALE: u64 = 15 * 60; // 15 minutes
+    const ASSUME_STALE: u64 = 5 * 60; // DIAGNOSTIC: lowered from 15min to provoke stale-tip
 
     /// While on IBD, if we've been without blocks for this long, ask for headers again
     const IBD_REQUEST_BLOCKS_AGAIN: u64 = 30; // 30 seconds

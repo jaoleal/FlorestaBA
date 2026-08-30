@@ -273,8 +273,20 @@ where
             let locator = self.chain.get_block_locator()?;
             self.send_to_peer(peer, NodeRequest::GetHeaders(locator))?;
 
-            self.inflight
+            let prev = self
+                .inflight
                 .insert(InflightRequests::Headers, (peer, Instant::now()));
+            match prev {
+                Some((old_peer, old_time)) => warn!(
+                    "HEADERS-SINGLETON overwrite: extra-peer handshake (peer={peer}) clobbered \
+                     pending getheaders to peer={old_peer} (age={:?}). That request is now \
+                     untracked: no timeout, no banscore, no retry.",
+                    old_time.elapsed()
+                ),
+                None => info!(
+                    "HEADERS-SINGLETON insert: extra-peer handshake tracking getheaders to peer={peer}"
+                ),
+            }
 
             return Ok(());
         }
@@ -516,6 +528,14 @@ where
         for req in inflight {
             self.inflight.remove(&req.0);
 
+            if matches!(req.0, InflightRequests::Headers) {
+                warn!(
+                    "HEADERS-SINGLETON disconnect-remove: peer={peer} disconnected holding \
+                     the headers entry (age={:?}); redo_inflight_request re-issues it next.",
+                    req.1.1.elapsed()
+                );
+            }
+
             if let Err(e) = self.redo_inflight_request(&req.0) {
                 // CRITICAL: never drop the request, so we retry it later
                 self.inflight.insert(req.0, req.1);
@@ -625,6 +645,15 @@ where
                 continue;
             };
 
+            if matches!(req, InflightRequests::Headers) {
+                warn!(
+                    "HEADERS-SINGLETON timeout-remove: getheaders to peer={peer} timed out \
+                     (age={:?}); banscore and timeout-retry follow. If a collision wiped and \
+                     re-inserted the entry meanwhile, this may punish the wrong peer.",
+                    time.elapsed()
+                );
+            }
+
             // If a feeler connection times out, we ban them at the first message
             if let Some(peer_data) = self.peers.get(&peer) {
                 if peer_data.kind == ConnectionKind::Feeler {
@@ -719,6 +748,10 @@ where
                 let peer =
                     self.send_to_fast_peer(NodeRequest::GetHeaders(locator), ServiceFlags::NONE)?;
 
+                warn!(
+                    "HEADERS-SINGLETON timeout-retry: re-requesting headers from peer={peer}. \
+                     If more than one logical getheaders was pending, only this one is reborn."
+                );
                 self.inflight
                     .insert(InflightRequests::Headers, (peer, Instant::now()));
             }
@@ -807,6 +840,14 @@ where
 
             PeerMessages::Headers(_) => {
                 let inflight = self.inflight.get(&InflightRequests::Headers)?;
+                if inflight.0 != peer {
+                    warn!(
+                        "HEADERS-SINGLETON dirty-latency: headers from peer={peer} being timed \
+                         against the Instant of a request sent to peer={}. This poisons \
+                         message_times and fast-peer selection.",
+                        inflight.0
+                    );
+                }
                 inflight.1
             }
 

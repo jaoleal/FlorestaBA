@@ -385,6 +385,15 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
                 let _ = self.write(NetworkMessage::GetCFilters(get_filter)).await;
             }
             NodeRequest::GetHeaders(locator) => {
+                debug!(
+                    "HDR-WIRE send peer={} ts={} locator_tip={}",
+                    self.id,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    locator.first().map(|h| h.to_string()).unwrap_or_default()
+                );
                 let _ = self
                     .write(NetworkMessage::GetHeaders(
                         bitcoin::p2p::message_blockdata::GetHeadersMessage {
@@ -503,6 +512,15 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
                     self.write(NetworkMessage::Headers(Vec::new())).await?;
                 }
                 NetworkMessage::Headers(headers) => {
+                    debug!(
+                        "HDR-WIRE recv peer={} ts={} count={}",
+                        self.id,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                        headers.len()
+                    );
                     self.send_to_node(PeerMessages::Headers(headers), time);
                 }
                 NetworkMessage::SendHeaders => {

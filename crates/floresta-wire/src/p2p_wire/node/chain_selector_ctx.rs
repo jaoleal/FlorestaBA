@@ -773,8 +773,19 @@ where
 
         let peer = self.send_to_fast_peer(NodeRequest::GetHeaders(locator), ServiceFlags::NONE)?;
 
-        self.inflight
+        let prev = self
+            .inflight
             .insert(InflightRequests::Headers, (peer, Instant::now()));
+        match prev {
+            Some((old_peer, old_time)) => warn!(
+                "HEADERS-SINGLETON overwrite: header-sync request to peer={peer} clobbered \
+                 pending getheaders to peer={old_peer} (age={:?}).",
+                old_time.elapsed()
+            ),
+            None => info!(
+                "HEADERS-SINGLETON insert: header-sync tracking getheaders to peer={peer}"
+            ),
+        }
 
         Ok(())
     }
@@ -955,6 +966,15 @@ where
 
             for inflight in self.inflight.clone().iter() {
                 if inflight.1.1.elapsed().as_secs() > 60 {
+                    if matches!(inflight.0, InflightRequests::Headers) {
+                        warn!(
+                            "HEADERS-SINGLETON sweep-remove: utreexo-state loop silently \
+                             dropped the headers entry tracking peer={} (age={:?}); NO retry \
+                             follows this path.",
+                            inflight.1.0,
+                            inflight.1.1.elapsed()
+                        );
+                    }
                     self.inflight.remove(inflight.0);
                 }
             }
@@ -1015,7 +1035,18 @@ where
 
         match unhandled {
             PeerMessages::Headers(headers) => {
-                self.inflight.remove(&InflightRequests::Headers);
+                match self.inflight.remove(&InflightRequests::Headers) {
+                    Some((tracked_peer, _)) if tracked_peer == peer => {}
+                    Some((tracked_peer, time)) => warn!(
+                        "HEADERS-SINGLETON wrong-peer-remove (sync): headers from peer={peer} \
+                         wiped the entry tracking peer={tracked_peer} (age={:?}).",
+                        time.elapsed()
+                    ),
+                    None => warn!(
+                        "HEADERS-SINGLETON unsolicited (sync): headers from peer={peer} with \
+                         no inflight entry."
+                    ),
+                }
                 return self.handle_headers(peer, headers).await;
             }
 

@@ -439,6 +439,23 @@ where
         // Check if some of our peers have timed out a request
         try_and_log!(self.check_for_timeout());
 
+        // HDR-MAP snapshot: the node's *belief* about the Headers singleton, stamped every
+        // tick so an offline parser can reconcile it against the HDR-WIRE ledger. This is the
+        // buggy projection; the wire ledger is ground truth.
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            match self.inflight.get(&InflightRequests::Headers) {
+                Some((peer, since)) => info!(
+                    "HDR-MAP snapshot ts={now_ms} believes=peer{peer} age_ms={}",
+                    since.elapsed().as_millis()
+                ),
+                None => info!("HDR-MAP snapshot ts={now_ms} believes=none"),
+            }
+        }
+
         // Open new feeler connection periodically
         periodic_job!(
             self.last_feeler => self.open_feeler_connection(),
@@ -601,15 +618,28 @@ where
         // until we get a new block.
         self.last_tip_update = Instant::now();
         self.create_connection(ConnectionKind::Extra)?;
-        self.send_to_random_peer(
+        let random_peer = self.send_to_random_peer(
             NodeRequest::GetHeaders(self.chain.get_block_locator().unwrap()),
             ServiceFlags::NONE,
         )?;
+        warn!(
+            "HEADERS-SINGLETON orphan-request: stale-tip handler sent getheaders to random \
+             peer={random_peer} with NO inflight entry. Born untracked (no timeout possible); \
+             its response will wipe whatever entry exists — likely the extra-peer's, inserted \
+             moments from now on handshake."
+        );
         Ok(())
     }
 
     fn handle_new_block(&mut self, block: BlockHash, peer: u32) -> Result<(), WireError> {
-        if self.inflight.contains_key(&InflightRequests::Headers) {
+        if let Some((tracked_peer, time)) = self.inflight.get(&InflightRequests::Headers) {
+            info!(
+                "HEADERS-SINGLETON guard-hit: skipping getheaders for new block {block} \
+                 (inv from peer={peer}) because the singleton is held by peer={tracked_peer} \
+                 (age={:?}). If that entry is stale/orphaned, this block is being blocked \
+                 by a ghost.",
+                time.elapsed()
+            );
             return Ok(());
         }
 
@@ -620,6 +650,10 @@ where
         let locator = self.chain.get_block_locator().unwrap();
         self.send_to_peer(peer, NodeRequest::GetHeaders(locator))?;
 
+        info!(
+            "HEADERS-SINGLETON insert: new-block handler tracking getheaders to peer={peer} \
+             for block {block}"
+        );
         self.inflight
             .insert(InflightRequests::Headers, (peer, Instant::now()));
 
@@ -707,7 +741,25 @@ where
                             "Got headers from peer {peer} with {} headers",
                             headers.len()
                         );
-                        self.inflight.remove(&InflightRequests::Headers);
+                        match self.inflight.remove(&InflightRequests::Headers) {
+                            Some((tracked_peer, time)) if tracked_peer == peer => info!(
+                                "HEADERS-SINGLETON clean-remove: headers from peer={peer} \
+                                 matched the tracked request (rtt={:?})",
+                                time.elapsed()
+                            ),
+                            Some((tracked_peer, time)) => warn!(
+                                "HEADERS-SINGLETON wrong-peer-remove: headers from peer={peer} \
+                                 wiped the entry tracking peer={tracked_peer} (age={:?}). The \
+                                 request to peer={tracked_peer} is now untracked: no timeout, \
+                                 no banscore, no retry.",
+                                time.elapsed()
+                            ),
+                            None => warn!(
+                                "HEADERS-SINGLETON unsolicited: headers from peer={peer} with \
+                                 no inflight entry — likely a BIP130 block announcement, or \
+                                 the entry was already wiped by an earlier collision."
+                            ),
+                        }
 
                         let peer_info = self.peers.get(&peer).cloned().expect("Peer not found");
                         let is_extra = matches!(peer_info.kind, ConnectionKind::Extra);
