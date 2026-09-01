@@ -1459,6 +1459,15 @@ pub mod migrate_v0_to_v1 {
         Ok(true)
     }
 
+    /// The on-disk length of a v0 metadata file, as this build lays it out.
+    ///
+    /// Exposed so the layout tests can compare it against the real v0 fixture and against
+    /// `size_of::<Metadata>()` without `MetadataV0` leaving this module.
+    #[cfg(test)]
+    pub(super) const fn metadata_v0_size() -> usize {
+        size_of::<MetadataV0>()
+    }
+
     /// Initialize a read-only mmap
     pub(super) fn init_mmap(file_path: &Path, size: usize) -> Result<Mmap, FlatChainstoreError> {
         let file = OpenOptions::new().read(true).open(file_path)?;
@@ -1469,8 +1478,12 @@ pub mod migrate_v0_to_v1 {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::align_of;
+    use core::mem::offset_of;
     use core::mem::size_of;
     use std::fs;
+    use std::path::Path;
+    use std::path::PathBuf;
 
     use bitcoin::Block;
     use bitcoin::BlockHash;
@@ -1506,6 +1519,7 @@ mod tests {
     use crate::DiskBlockHeader;
     use crate::migrate_v0_to_v1::init_mmap;
     use crate::migrate_v0_to_v1::maybe_migrate;
+    use crate::migrate_v0_to_v1::metadata_v0_size;
     use crate::pruned_utreexo::UpdatableChainstate;
     use crate::pruned_utreexo::flat_chain_store::FileChecksum;
     use crate::pruned_utreexo::flat_chain_store::Metadata;
@@ -2285,5 +2299,316 @@ mod tests {
             1,
             "persistence: warning must survive get_warnings calls"
         );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // On-disk layout regression guards
+    //
+    // The chainstore mmaps `Metadata` and `HashedDiskHeader` straight out of the files in the
+    // datadir, so their `size_of`/`offset_of` *are* the file format. A rustc or `bitcoin` bump
+    // that moves any of these numbers silently changes what a user's datadir means; the asserts
+    // below are deliberately hard-coded so that shows up here instead of there.
+    //
+    // They are runtime (not `const`) asserts on purpose: a failing const assert aborts the whole
+    // build, which on a 32-bit target hides *which* claim broke.
+    // ---------------------------------------------------------------------------------------
+
+    /// The length of a v1 `metadata.bin` as written by a 64-bit build.
+    ///
+    /// Hard-coded rather than derived from `size_of::<Metadata>()`: the point of the fixtures
+    /// below is to compare a real 64-bit file against what the running build believes.
+    const V1_METADATA_LEN: usize = 2184;
+
+    /// Offset of the `checksum` field inside a v1 `metadata.bin` written by a 64-bit build.
+    const V1_CHECKSUM_OFFSET: usize = 2160;
+
+    /// A header record is 128 bytes, and every capacity calculation in this module depends on it.
+    #[test]
+    fn header_record_layout_is_stable() {
+        assert_eq!(size_of::<Header>(), 80);
+        assert_eq!(size_of::<DiskBlockHeader>(), 88);
+        assert_eq!(align_of::<DiskBlockHeader>(), 4);
+        assert_eq!(size_of::<HashedDiskHeader>(), 128);
+        assert_eq!(align_of::<HashedDiskHeader>(), 4);
+    }
+
+    /// `Metadata` must lay out identically regardless of pointer width.
+    ///
+    /// These are *not* gated on `target_pointer_width`: the whole point is that a 32-bit build
+    /// must agree with a 64-bit one, so a 32-bit failure here is the finding, not a bad
+    /// expectation. `fork_count` at 2124 and `headers_file_size` at 2128 are the load-bearing
+    /// pair — together they show there is no padding before the first pointer-sized field, which
+    /// is why widening those fields to `u64` would be byte-compatible with existing databases.
+    #[test]
+    fn metadata_layout_is_pointer_width_independent() {
+        assert_eq!(offset_of!(Metadata, fork_count), 2124);
+        assert_eq!(offset_of!(Metadata, headers_file_size), 2128);
+        assert_eq!(offset_of!(Metadata, checksum), V1_CHECKSUM_OFFSET);
+        assert_eq!(size_of::<Metadata>(), V1_METADATA_LEN);
+        assert_eq!(align_of::<Metadata>(), 8);
+    }
+
+    /// `maybe_migrate` fires on `meta.len() == size_of::<MetadataV0>()`, so a v1 file must never
+    /// be mistaken for a v0 one — on any pointer width. `MetadataV0` carries the same `usize`
+    /// fields as `Metadata`, so it diverges the same way.
+    #[test]
+    fn metadata_versions_have_distinct_sizes() {
+        assert_eq!(metadata_v0_size(), 2192);
+        assert_eq!(size_of::<Metadata>(), V1_METADATA_LEN);
+        assert_ne!(
+            metadata_v0_size(),
+            size_of::<Metadata>(),
+            "a v1 file must not be mistaken for a v0 one"
+        );
+
+        // Tie the constant to the real artifact the migration test replays. `maybe_migrate`
+        // triggers on `meta.len() == size_of::<MetadataV0>()`, so if this build disagrees with
+        // the fixture it will not recognise a v0 datadir as v0 at all — which is what a 32-bit
+        // build does to a v0 datadir written on a 64-bit host.
+        let fixture = fs::metadata("./testdata/v0_flat_metadata.bin").unwrap();
+        assert_eq!(
+            fixture.len(),
+            metadata_v0_size() as u64,
+            "this build would not recognise the v0 fixture as a v0 file",
+        );
+    }
+
+    /// The default configuration reserves 2 GiB of contiguous address space for the headers map.
+    ///
+    /// Expressed in `u64` so the arithmetic itself is architecture-independent; only the mapping
+    /// at the end is target-dependent.
+    #[test]
+    fn default_config_reserves_two_gib() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = FlatChainStoreConfig::new(tmp.path());
+
+        let headers = FlatChainStore::truncate_to_pow2(cfg.headers_file_size.unwrap());
+        assert_eq!(headers, 1 << 24);
+        assert_eq!(
+            headers as u64 * size_of::<HashedDiskHeader>() as u64,
+            2_147_483_648
+        );
+        assert_eq!(
+            FlatChainStore::truncate_to_pow2(cfg.block_index_size.unwrap()) as u64 * 4,
+            67_108_864
+        );
+        assert_eq!(
+            FlatChainStore::truncate_to_pow2(cfg.fork_file_size.unwrap()) as u64 * 128,
+            2_097_152
+        );
+
+        // This is the invariant a 32-bit target violates: 2 GiB is half of everything it can
+        // address, and roughly two thirds of what is actually user-addressable.
+        assert!(
+            2_147_483_648u64 < (usize::MAX as u64 / 2),
+            "the default headers map does not fit in this target's address space"
+        );
+
+        let store = FlatChainStore::new(FlatChainStoreConfig::new(tmp.path()));
+        assert!(store.is_ok(), "default config must map on this target");
+    }
+
+    /// `truncate_to_pow2` smears bits only down to `>> 16`, so it is correct only below 2^32.
+    ///
+    /// Above that it returns `2^k - 1`, which is not a power of two at all — silently breaking
+    /// the `hash & (capacity - 1)` masking that [`BlockIndex`] and the module docs both depend
+    /// on. This pins the current (wrong) result; `n.next_power_of_two()` is the fix, and this
+    /// test is what should flip when it lands.
+    ///
+    /// The `cfg` gate is mandatory: `1usize << 32` does not compile on a 32-bit target. This is
+    /// the one finding here that is a bug *only* on 64-bit — every value the existing
+    /// `test_truncate_pow2` checks sits below 2^32.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn truncate_to_pow2_is_wrong_above_u32() {
+        const INPUT: usize = (1usize << 32) + 1;
+
+        // What a correct round-up returns.
+        assert_eq!(INPUT.next_power_of_two(), 1 << 33);
+
+        // What we actually return: 2^33 - 1 = 8589934591.
+        let got = FlatChainStore::truncate_to_pow2(INPUT);
+        assert_eq!(got, 8_589_934_591);
+        assert_eq!(got, (1 << 33) - 1);
+        assert!(
+            !got.is_power_of_two(),
+            "capacity must be a power of two for `hash & (capacity - 1)` to be a valid mask",
+        );
+
+        // The boundary itself is still fine; the ceiling is exactly 2^32.
+        assert_eq!(FlatChainStore::truncate_to_pow2(1usize << 32), 1 << 32);
+    }
+
+    /// `DiskBlockHeader`'s discriminant occupies four zero-extended bytes at offset 0.
+    ///
+    /// This holds the current behaviour in place rather than proving a bug: it is the
+    /// precondition for pinning the enum with `#[repr(u32)]` without a schema bump. Variants are
+    /// numbered in declaration order.
+    #[test]
+    fn disk_block_header_discriminant_is_a_zero_extended_u32() {
+        let header = genesis_block(Network::Regtest).header;
+        let variants = [
+            (0u8, DiskBlockHeader::FullyValid(header, 0x1234_5678)),
+            (1, DiskBlockHeader::AssumedValid(header, 0x1234_5678)),
+            (2, DiskBlockHeader::Orphan(header)),
+            (3, DiskBlockHeader::HeadersOnly(header, 0x1234_5678)),
+            (4, DiskBlockHeader::InFork(header, 0x1234_5678)),
+            (5, DiskBlockHeader::InvalidChain(header)),
+        ];
+
+        for (tag, variant) in variants {
+            // Poison every byte, then write the variant through a `*mut DiskBlockHeader` exactly
+            // like `get_disk_header_mut` does, so the tag bytes we assert on can only have been
+            // written by the store itself. The scratch buffer is a `MaybeUninit<DiskBlockHeader>`
+            // rather than a `[u8; 88]` because the write needs the type's own alignment.
+            let mut slot = core::mem::MaybeUninit::<DiskBlockHeader>::uninit();
+            let bytes = unsafe {
+                core::ptr::write_bytes(
+                    slot.as_mut_ptr() as *mut u8,
+                    0xFF,
+                    size_of::<DiskBlockHeader>(),
+                );
+                slot.as_mut_ptr().write(variant);
+                core::slice::from_raw_parts(
+                    slot.as_ptr() as *const u8,
+                    size_of::<DiskBlockHeader>(),
+                )
+            };
+
+            assert_eq!(
+                &bytes[0..4],
+                &[tag, 0x00, 0x00, 0x00],
+                "variant {tag} must be a zero-extended 4-byte tag at offset 0",
+            );
+        }
+    }
+
+    /// Writes a byte-exact v1 `metadata.bin` as a 64-bit build would leave it.
+    ///
+    /// Built from literals, not from `size_of::<Metadata>()` — deriving it from the running
+    /// build's layout would make the truncation test a tautology.
+    fn write_64_bit_metadata_fixture(datadir: &Path) -> PathBuf {
+        fs::create_dir_all(datadir).unwrap();
+
+        let mut buf = vec![0u8; V1_METADATA_LEN];
+        buf[0..4].copy_from_slice(&FLAT_CHAINSTORE_MAGIC.to_ne_bytes());
+        buf[4..8].copy_from_slice(&FLAT_CHAINSTORE_VERSION.to_ne_bytes());
+        // The checksum region: 3 x u64, the last thing in the struct and the first thing a
+        // shorter `set_len` would cut off.
+        buf[V1_CHECKSUM_OFFSET..V1_METADATA_LEN].copy_from_slice(&[0xAB; 24]);
+
+        let path = datadir.join("metadata.bin");
+        fs::write(&path, &buf).unwrap();
+        path
+    }
+
+    /// Opening a datadir written by a differently-sized build must not rewrite it.
+    ///
+    /// `init_file` calls `set_len` unconditionally and `open` used to map `metadata.bin` before
+    /// any validation ran, so a 32-bit build opening a 64-bit datadir truncated it — losing the
+    /// checksum region permanently. This is data loss, not a misread.
+    #[test]
+    fn opening_a_64_bit_datadir_must_not_truncate_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_64_bit_metadata_fixture(tmp.path());
+
+        // We don't care whether the open succeeds; we care that it left the bytes alone.
+        let _ = FlatChainStore::new(FlatChainStoreConfig::new(tmp.path()));
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(
+            after.len(),
+            V1_METADATA_LEN,
+            "metadata.bin was truncated on open"
+        );
+        assert_eq!(
+            &after[V1_CHECKSUM_OFFSET..V1_METADATA_LEN],
+            &[0xAB; 24],
+            "checksum region destroyed"
+        );
+    }
+
+    /// `open` resizes `metadata.bin` before validating anything.
+    ///
+    /// `init_file` calls `file.set_len(size)` unconditionally, and `open` maps the metadata at
+    /// `size_of::<Metadata>()` with no length check — before the magic and version checks run.
+    /// A file that is longer than this build expects therefore gets *truncated on open*.
+    ///
+    /// Here that is only a poisoned tail, but it is the exact mechanism by which a 32-bit build
+    /// opening a 64-bit datadir destroys the checksum region: see
+    /// [`opening_a_64_bit_datadir_must_not_truncate_metadata`]. The fix is to reject a
+    /// length mismatch before calling `init_file`.
+    #[test]
+    fn open_truncates_metadata_of_unexpected_length() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("metadata.bin");
+
+        // Longer than v1, and not the v0 length either, so `maybe_migrate` stays out of it.
+        let over = V1_METADATA_LEN + 16;
+        assert_ne!(
+            over,
+            metadata_v0_size(),
+            "fixture must not look like a v0 file"
+        );
+
+        let mut buf = vec![0u8; over];
+        buf[0..4].copy_from_slice(&FLAT_CHAINSTORE_MAGIC.to_ne_bytes());
+        buf[4..8].copy_from_slice(&FLAT_CHAINSTORE_VERSION.to_ne_bytes());
+        buf[V1_METADATA_LEN..over].copy_from_slice(&[0xAB; 16]);
+        fs::write(&path, &buf).unwrap();
+
+        let _ = FlatChainStore::new(FlatChainStoreConfig::new(tmp.path()));
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(
+            after.len(),
+            size_of::<Metadata>(),
+            "open() resized metadata.bin instead of rejecting the length mismatch",
+        );
+        assert!(
+            !after.ends_with(&[0xAB; 16]),
+            "the bytes past `size_of::<Metadata>()` were cut off, unrecoverably",
+        );
+    }
+
+    /// The size arithmetic in `create_chain_store` and `open` is unchecked.
+    ///
+    /// Neither `index_size * size_of::<u32>()` nor `headers_size * size_of::<HashedDiskHeader>()`
+    /// has an overflow guard. A release build therefore *wraps* to a mapping length of zero while
+    /// the metadata still records the requested capacity — after which every write through the
+    /// raw-pointer path in [`BlockIndex`] lands out of bounds.
+    ///
+    /// The capacities are derived from `usize::MAX` so this describes the same overflow on either
+    /// pointer width. On 32-bit they are configurations a user could plausibly ask for: 2^30
+    /// index buckets, or 2^25 headers.
+    #[test]
+    fn size_arithmetic_is_unchecked() {
+        let index = FlatChainStore::truncate_to_pow2((usize::MAX / size_of::<u32>()) + 1);
+        let headers =
+            FlatChainStore::truncate_to_pow2((usize::MAX / size_of::<HashedDiskHeader>()) + 1);
+
+        assert_eq!(
+            index.wrapping_mul(size_of::<u32>()),
+            0,
+            "a release build maps {index} buckets at a wrapped length of 0 bytes",
+        );
+        assert_eq!(
+            headers.wrapping_mul(size_of::<HashedDiskHeader>()),
+            0,
+            "a release build maps {headers} headers at a wrapped length of 0 bytes",
+        );
+    }
+
+    /// With overflow checks on, the same configuration aborts the process instead of returning
+    /// `Err`. Either way it is not a rejection: the fix is a `checked_mul` at both call sites.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "attempt to multiply with overflow")]
+    fn oversized_config_panics_instead_of_erroring() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = FlatChainStoreConfig::new(tmp.path());
+        cfg.block_index_size = Some((usize::MAX / size_of::<u32>()) + 1);
+
+        let _ = FlatChainStore::new(cfg);
     }
 }
