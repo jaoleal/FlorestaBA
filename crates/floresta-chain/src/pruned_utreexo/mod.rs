@@ -40,6 +40,7 @@ use self::chainstore::ChainStoreWarning;
 use self::partial_chain::PartialChainState;
 use crate::BlockConsumer;
 use crate::BlockchainError;
+use crate::CompactLeafData;
 use crate::prelude::*;
 use crate::pruned_utreexo::utxo_data::UtxoData;
 
@@ -133,7 +134,10 @@ pub trait BlockchainInterface {
     /// Returns all known chain tips, including the best one and forks
     fn get_chain_tips(&self) -> Result<Vec<BlockHash>, Self::Error>;
 
-    /// Validates a block according to Bitcoin's rules, without modifying our chain
+    /// Validates a block according to Bitcoin's rules, without modifying our chain. In order,
+    /// this verifies the utreexo inclusion `proof` for `del_hashes` against `acc`, the block
+    /// structure (merkle root, witness commitment and other header commitments), and the
+    /// block transactions given the spent `inputs`.
     fn validate_block(
         &self,
         block: &Block,
@@ -174,16 +178,23 @@ pub trait BlockchainInterface {
 /// implementation, that wishes to be updated. Using those methods, a backend like the p2p-node,
 /// can notify new blocks and transactions to a chainstate, allowing it to update it's state.
 pub trait UpdatableChainstate {
-    /// This is one of the most important methods for a ChainState,
-    /// it gets a block and some utreexo data, validates this block and
-    /// connects to our chain of blocks. This function is meant to be atomic
-    /// and prone of running in parallel.
+    /// This is one of the most important methods for a ChainState: it fully validates a block
+    /// and connects it to our chain of blocks, given the utreexo inclusion `proof` and the
+    /// `leaf_data` for the UTXOs it spends. Implementations must, in order:
+    ///
+    /// 1. Run the structural block checks, so the transaction data is authenticated by the
+    ///    block header (merkle root and witness commitment) before it is used below
+    /// 2. Reconstruct the spent UTXOs from `leaf_data`, and authenticate them by verifying
+    ///    `proof` against the accumulator
+    /// 3. Validate the block transactions, including the input amount and script checks
+    /// 4. Update the chain state with the new tip and accumulator
+    ///
+    /// This function is meant to be atomic and prone of running in parallel.
     fn connect_block(
         &self,
         block: &Block,
         proof: Proof,
-        inputs: HashMap<OutPoint, UtxoData>,
-        del_hashes: Vec<sha256::Hash>,
+        leaf_data: &[CompactLeafData],
     ) -> Result<u32, BlockchainError>;
 
     fn switch_chain(&self, new_tip: BlockHash) -> Result<(), BlockchainError>;
@@ -257,10 +268,9 @@ impl<T: UpdatableChainstate> UpdatableChainstate for Arc<T> {
         &self,
         block: &Block,
         proof: Proof,
-        inputs: HashMap<OutPoint, UtxoData>,
-        del_hashes: Vec<sha256::Hash>,
+        leaf_data: &[CompactLeafData],
     ) -> Result<u32, BlockchainError> {
-        T::connect_block(self, block, proof, inputs, del_hashes)
+        T::connect_block(self, block, proof, leaf_data)
     }
 
     fn accept_header(&self, header: BlockHeader) -> Result<(), BlockchainError> {

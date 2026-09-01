@@ -65,9 +65,11 @@ use super::partial_chain::PartialChainState;
 use super::partial_chain::PartialChainStateInner;
 use crate::BestChain;
 use crate::ChainStore;
+use crate::CompactLeafData;
 use crate::extensions::HeaderExt;
 use crate::extensions::WorkExt;
 use crate::prelude::*;
+use crate::proof_util;
 use crate::pruned_utreexo::IBDState;
 use crate::pruned_utreexo::utxo_data::UtxoData;
 use crate::read_lock;
@@ -1008,21 +1010,53 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         Ok(Consensus::check_bip94_time(block, &prev_header)?)
     }
 
-    /// Validates the block without checking whether the inputs are present in the UTXO set. This
-    /// function contains the core validation logic.
+    /// Runs the structural checks on a block, which require neither the UTXOs it spends nor
+    /// script execution. In order, this verifies that:
     ///
-    /// The methods `BlockchainInterface::validate_block` and `UpdatableChainstate::connect_block`
-    /// call this and additionally verify the inclusion proof (i.e., they perform full validation).
-    pub fn validate_block_no_acc(
+    /// 1. The header merkle root commits to the block's transaction data
+    /// 2. The BIP34 coinbase-encoded height matches `height`, once activated
+    /// 3. If there are SegWit transactions, the witness commitment is present and correct
+    /// 4. The total block weight is within the 4,000,000 WU limit
+    ///
+    /// Once this passes, the block data is authenticated by its (already validated) header, so
+    /// it is safe to use the transaction data, e.g., to reconstruct the spent UTXOs from the
+    /// utreexo leaf data.
+    pub fn validate_block_structure(
+        &self,
+        block: &Block,
+        height: u32,
+    ) -> Result<(), BlockchainError> {
+        let consensus = read_lock!(self).consensus.clone();
+        consensus.check_block(block, height)?;
+
+        Ok(())
+    }
+
+    /// Validates the block transactions given the UTXOs they spend. In order, this verifies
+    /// that:
+    ///
+    /// 1. The block has at least one transaction, and the first (and only the first) one is a
+    ///    coinbase with a single null-prevout input and a valid scriptSig size
+    /// 2. Every transaction is final (lock time and sequence checks, using the previous
+    ///    block's median time past as the BIP113 cutoff)
+    /// 3. Every transaction passes the context-free checks: non-empty inputs and outputs,
+    ///    script size and sigop limits, no duplicate inputs and no value overflows
+    /// 4. Every non-coinbase input spends a UTXO present in `inputs` that was not already
+    ///    spent within the block, only spending matured coinbase outputs, and no transaction
+    ///    creates more coins than it spends
+    /// 5. Input scripts are valid, when script validation is enabled (requires the
+    ///    `bitcoinkernel` feature)
+    /// 6. The coinbase reward doesn't exceed the block subsidy plus the collected fees
+    ///
+    /// This doesn't check the block structure (see [`ChainState::validate_block_structure`])
+    /// nor the utreexo inclusion proof, which authenticates the spent `inputs`.
+    pub fn validate_block_transactions(
         &self,
         block: &Block,
         height: u32,
         inputs: HashMap<OutPoint, UtxoData>,
     ) -> Result<(), BlockchainError> {
         let consensus = read_lock!(self).consensus.clone();
-        consensus.check_block(block, height)?;
-
-        // Validate block transactions
         let subsidy = consensus.get_subsidy(height);
         let lock_time_cutoff = consensus.block_lock_time_cutoff(height, &block.header, || {
             self.previous_median_time_past(&block.header)
@@ -1116,7 +1150,8 @@ impl<PersistedState: ChainStore> BlockchainInterface for ChainState<PersistedSta
             .get_disk_block_header(&block.block_hash())?
             .try_height()?;
 
-        self.validate_block_no_acc(block, height, inputs)
+        self.validate_block_structure(block, height)?;
+        self.validate_block_transactions(block, height, inputs)
     }
 
     fn get_block_locator_for_tip(&self, tip: BlockHash) -> Result<Vec<BlockHash>, BlockchainError> {
@@ -1334,12 +1369,22 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         inner.ibd = ibd_state;
     }
 
+    /// Fully validates a block and connects it to our chain, given its utreexo inclusion
+    /// `proof` and the `leaf_data` for the UTXOs it spends. In order, this:
+    ///
+    /// 1. Checks that `block` is the next one to be validated in our chain
+    /// 2. Runs the structural checks ([`ChainState::validate_block_structure`]),
+    ///    authenticating the transaction data against the block header
+    /// 3. Reconstructs the spent UTXOs from the peer-supplied `leaf_data`
+    /// 4. Verifies `proof` against our accumulator, authenticating the reconstructed UTXOs,
+    ///    and computes the updated accumulator
+    /// 5. Validates the block transactions ([`ChainState::validate_block_transactions`])
+    /// 6. Updates our chain state with the new tip and accumulator, and notifies subscribers
     fn connect_block(
         &self,
         block: &Block,
         proof: Proof,
-        inputs: HashMap<OutPoint, UtxoData>,
-        del_hashes: Vec<sha256::Hash>,
+        leaf_data: &[CompactLeafData],
     ) -> Result<u32, BlockchainError> {
         let header = self.get_disk_block_header(&block.block_hash())?;
         let height = match header {
@@ -1386,6 +1431,22 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             }
         };
 
+        // Check the commitments to the transaction data (merkle root and witness commitment)
+        // first, so the utreexo leaf data below is reconstructed from authenticated txdata.
+        self.validate_block_structure(block, height)?;
+
+        // Reconstruct the UTXOs spent by this block from the peer-supplied leaf data. Errors
+        // here mean bad peer data, and surface as `BlockchainError`s so the caller can punish
+        // the peer that supplied the proof.
+        let (del_hashes, inputs) =
+            proof_util::process_proof(leaf_data, &block.txdata, height, |h| {
+                self.get_block_hash(h)
+            })?;
+
+        // Verify the utreexo inclusion proof, authenticating the reconstructed UTXOs against
+        // our accumulator before they are used for transaction validation.
+        let acc = Consensus::update_acc(&self.acc(), block, height, proof, del_hashes)?;
+
         // Clone inputs only if a subscriber wants spent utxos
         let inputs_for_notifications = self
             .inner
@@ -1395,8 +1456,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             .any(|subscriber| subscriber.wants_spent_utxos())
             .then(|| inputs.clone());
 
-        self.validate_block_no_acc(block, height, inputs)?;
-        let acc = Consensus::update_acc(&self.acc(), block, height, proof, del_hashes)?;
+        self.validate_block_transactions(block, height, inputs)?;
 
         self.update_view(height, &block.header, acc)?;
 
@@ -1780,13 +1840,13 @@ mod test {
         let valid =
             block_with_coinbase(height, test_coinbase(height, Sequence::MAX, LockTime::ZERO));
 
-        match chain.validate_block_no_acc(&invalid, height, HashMap::new()) {
+        match chain.validate_block_transactions(&invalid, height, HashMap::new()) {
             Err(BlockchainError::BlockValidation(BlockValidationErrors::NonFinalTransaction)) => {}
             other => panic!("expected NonFinalTransaction, got {other:?}"),
         }
 
         chain
-            .validate_block_no_acc(&valid, height, HashMap::new())
+            .validate_block_transactions(&valid, height, HashMap::new())
             .expect("block transactions are valid and final");
     }
 
@@ -1801,7 +1861,7 @@ mod test {
         let block = block_with_transactions(height, vec![coinbase(), transaction]);
 
         chain
-            .validate_block_no_acc(&block, height, inputs)
+            .validate_block_transactions(&block, height, inputs)
             .expect("all input sequences are final");
 
         let (transaction, inputs) = test_spend(
@@ -1811,7 +1871,7 @@ mod test {
         );
         let block = block_with_transactions(height, vec![coinbase(), transaction]);
 
-        match chain.validate_block_no_acc(&block, height, inputs) {
+        match chain.validate_block_transactions(&block, height, inputs) {
             Err(BlockchainError::BlockValidation(BlockValidationErrors::NonFinalTransaction)) => {}
             other => panic!("expected NonFinalTransaction, got {other:?}"),
         }
@@ -1835,7 +1895,10 @@ mod test {
         // Check whether the block validation passes or not
         let chain = setup_test_chain(Network::Bitcoin, AssumeValidArg::Disabled, Some(BLOCKS));
         chain
-            .validate_block_no_acc(&block, HEIGHT, inputs)
+            .validate_block_structure(&block, HEIGHT)
+            .expect("Block structure must be valid");
+        chain
+            .validate_block_transactions(&block, HEIGHT, inputs)
             .expect("Block must be valid");
     }
 
@@ -1858,7 +1921,10 @@ mod test {
         let prev_hash = store_mtp_headers(&chain, Network::Bitcoin, HEIGHT - 1, block.header.time);
         block.header.prev_blockhash = prev_hash;
         chain
-            .validate_block_no_acc(&block, HEIGHT, inputs)
+            .validate_block_structure(&block, HEIGHT)
+            .expect("Block structure must be valid");
+        chain
+            .validate_block_transactions(&block, HEIGHT, inputs)
             .expect("Block must be valid");
     }
 
@@ -2113,9 +2179,7 @@ mod test {
         // Connect the first 10 blocks after genesis
         for block in short_chain {
             chain.accept_header(block.header).unwrap();
-            chain
-                .connect_block(&block, Proof::default(), HashMap::new(), Vec::new())
-                .unwrap();
+            chain.connect_block(&block, Proof::default(), &[]).unwrap();
 
             if block.block_hash()
                 == bhash!("45c74beefa2a110715377e023d4260168b4cafbb0891f3b0869aea30867acc87")
@@ -2151,9 +2215,7 @@ mod test {
 
         // Actually connect the fork chain
         for fork in long_chain {
-            chain
-                .connect_block(&fork, Proof::default(), HashMap::new(), Vec::new())
-                .unwrap();
+            chain.connect_block(&fork, Proof::default(), &[]).unwrap();
         }
 
         for i in 1..=chain.get_height().unwrap() {
