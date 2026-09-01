@@ -116,7 +116,7 @@ where
         self.inflight.remove(&InflightRequests::Blocks(block_hash));
 
         // Reply and return early if it's a user-requested block. Else continue handling it.
-        let Some(block) = self.check_is_user_block_and_reply(block)? else {
+        let Some(block) = self.check_is_user_block_and_reply(block, peer)? else {
             return Ok(());
         };
 
