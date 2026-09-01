@@ -1625,6 +1625,7 @@ mod test {
     use bitcoin::Sequence;
     use bitcoin::Transaction;
     use bitcoin::TxMerkleNode;
+    use bitcoin::Witness;
     use bitcoin::Work;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::Header as BlockHeader;
@@ -1651,8 +1652,10 @@ mod test {
     use crate::AssumeValidArg;
     use crate::BlockchainError;
     use crate::ChainStore;
+    use crate::CompactLeafData;
     use crate::FlatChainStore;
     use crate::FlatChainStoreConfig;
+    use crate::ScriptPubKeyKind;
     use crate::extensions::WorkExt;
     use crate::prelude::HashMap;
     use crate::pruned_utreexo::consensus::Consensus;
@@ -1722,6 +1725,17 @@ mod test {
 
     fn block_with_coinbase(height: u32, coinbase: Transaction) -> Block {
         block_with_transactions(height, vec![coinbase])
+    }
+
+    /// Grinds the header nonce until the block satisfies its own target. On regtest,
+    /// virtually every nonce works, so this returns almost immediately.
+    fn mine(mut block: Block) -> Block {
+        let target = block.header.target();
+        while block.header.validate_pow(target).is_err() {
+            block.header.nonce += 1;
+        }
+
+        block
     }
 
     fn test_outpoint(vout: u32) -> OutPoint {
@@ -2232,6 +2246,145 @@ mod test {
                 panic!("Expected block at height {i} to be FullyValid, got: {header:?}");
             }
         }
+    }
+
+    /// Asserts the order of the checks performed by `connect_block`, using fabricated blocks
+    /// that are broken in several ways at once. The error we get back must always come from
+    /// the earliest stage:
+    ///
+    /// 1. The tip check: the block must be the next one to be validated
+    /// 2. The structural checks: merkle root first, then the witness commitment
+    /// 3. The utreexo leaf data reconstruction
+    /// 4. The utreexo proof verification against the accumulator
+    /// 5. The transaction validation, which requires the (now authenticated) spent UTXOs
+    #[test]
+    fn test_connect_block_error_precedence() {
+        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled, None);
+
+        // Block 1 is valid and coinbase-only
+        let b1 = mine(block_with_coinbase(
+            1,
+            test_coinbase(1, Sequence::MAX, LockTime::ZERO),
+        ));
+
+        // Block 2 commits to a coinbase plus a transaction spending a UTXO we don't have
+        let spend = Transaction {
+            version: TransactionVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![txin!(test_outpoint(0), ScriptBuf::new(), Sequence::MAX)],
+            output: vec![txout!(1, ScriptBuf::new_op_return([0x0, 0x1]))],
+        };
+        let mut b2 = block_with_transactions(
+            2,
+            vec![test_coinbase(2, Sequence::MAX, LockTime::ZERO), spend],
+        );
+        b2.header.prev_blockhash = b1.block_hash();
+        let b2 = mine(b2);
+
+        chain.accept_header(b1.header).unwrap();
+        chain.accept_header(b2.header).unwrap();
+
+        // A proof and a leaf claiming creation at genesis, which fail every utreexo check.
+        // We hand them to earlier-failing blocks to show that the earliest error wins.
+        let bogus_proof = Proof {
+            targets: vec![0],
+            hashes: Vec::new(),
+        };
+        let genesis_leaf = CompactLeafData {
+            header_code: 0,
+            amount: 100_000_000,
+            spk_ty: ScriptPubKeyKind::Other(Vec::new().into_boxed_slice()),
+        };
+
+        // A mutated block 2: same (valid) header, but the transaction data neither matches
+        // the merkle root nor commits to the coinbase witness
+        let mut mutated_b2 = b2.clone();
+        mutated_b2.txdata = vec![test_coinbase(999, Sequence::MAX, LockTime::ZERO)];
+        mutated_b2.txdata[0].input[0].witness = Witness::from_slice(&[[0u8; 32]]);
+        assert_eq!(mutated_b2.block_hash(), b2.block_hash());
+
+        // 1. Tip check: block 2 can't be connected while block 1 is pending, and this wins
+        // over the mutation and the bogus utreexo data
+        let err = chain
+            .connect_block(
+                &mutated_b2,
+                bogus_proof.clone(),
+                std::slice::from_ref(&genesis_leaf),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BlockchainError::BlockValidation(BlockValidationErrors::BlockDoesntExtendTip)
+        ));
+
+        chain.connect_block(&b1, Proof::default(), &[]).unwrap();
+        assert_eq!(chain.get_validation_index().unwrap(), 1);
+
+        // 2a. Structure: the merkle root mismatch wins over the (also broken) witness
+        // commitment, the bogus utreexo data and the invalid transaction
+        let err = chain
+            .connect_block(
+                &mutated_b2,
+                bogus_proof.clone(),
+                std::slice::from_ref(&genesis_leaf),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BlockchainError::BlockValidation(BlockValidationErrors::BadMerkleRoot)
+        ));
+
+        // 2b. Structure: with the correct txdata but a tampered coinbase witness, the witness
+        // commitment check wins over the bogus utreexo data and the invalid transaction
+        let mut witness_b2 = b2.clone();
+        witness_b2.txdata[0].input[0].witness = Witness::from_slice(&[[0u8; 32]]);
+        assert!(witness_b2.check_merkle_root());
+
+        let err = chain
+            .connect_block(
+                &witness_b2,
+                bogus_proof.clone(),
+                std::slice::from_ref(&genesis_leaf),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BlockchainError::BlockValidation(BlockValidationErrors::BadWitnessCommitment)
+        ));
+
+        // 3. Leaf reconstruction: with a structurally valid block, the invalid leaf data wins
+        // over the bogus proof and the invalid transaction
+        let err = chain
+            .connect_block(&b2, bogus_proof.clone(), &[genesis_leaf])
+            .unwrap_err();
+        assert!(matches!(err, BlockchainError::UtreexoLeaf(_)));
+
+        // 4. Proof verification: with a reconstructable leaf, the proof failing to verify
+        // against our accumulator wins over the invalid transaction
+        let h1_leaf = CompactLeafData {
+            header_code: 1 << 1, // creation height 1, not a coinbase
+            amount: 100_000_000,
+            spk_ty: ScriptPubKeyKind::Other(
+                anyone_can_spend_script().to_bytes().into_boxed_slice(),
+            ),
+        };
+        let err = chain
+            .connect_block(&b2, bogus_proof, &[h1_leaf])
+            .unwrap_err();
+        assert!(matches!(err, BlockchainError::AccumulatorError(_)));
+
+        // 5. Transaction validation: with no leaf data, there's nothing to prove, so the spent
+        // UTXO is simply missing and we finally get a transaction-level error
+        let err = chain.connect_block(&b2, Proof::default(), &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            BlockchainError::TransactionError(e)
+                if matches!(e.error, BlockValidationErrors::UtxoNotFound(_))
+        ));
+
+        // None of the failed attempts changed our chain
+        assert_eq!(chain.get_validation_index().unwrap(), 1);
+        assert_eq!(chain.get_best_block().unwrap().0, 2);
     }
 
     #[test]
