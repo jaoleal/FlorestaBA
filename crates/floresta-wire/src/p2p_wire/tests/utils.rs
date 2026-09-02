@@ -9,6 +9,7 @@ use std::time::Instant;
 use bitcoin::Block;
 use bitcoin::BlockHash;
 use bitcoin::Network;
+use bitcoin::Witness;
 use bitcoin::block::Header;
 use bitcoin::consensus::Decodable;
 use bitcoin::consensus::encode;
@@ -282,6 +283,21 @@ pub fn signet_roots() -> HashMap<BlockHash, Vec<u8>> {
     accs
 }
 
+/// Returns the signet block at height 7 with a tampered coinbase witness reserved value.
+///
+/// The witness reserved value is committed by the witness commitment but not by the txid
+/// merkle tree, so the merkle root still matches while the witness commitment doesn't.
+pub fn witness_mutated_block_h7() -> Block {
+    let headers = signet_headers();
+    let mut block = signet_blocks()
+        .remove(&headers[7].block_hash())
+        .expect("we have the first 121 signet blocks");
+
+    block.txdata[0].input[0].witness = Witness::from_slice(&[[0xff_u8; 32]]);
+
+    block
+}
+
 /// Returns a mutated signet block at height 7
 pub fn mutated_block_h7() -> Block {
     deserialize_hex(
@@ -466,6 +482,7 @@ mod tests {
     use super::signet_blocks;
     use super::signet_headers;
     use super::signet_roots;
+    use super::witness_mutated_block_h7;
 
     #[test]
     fn test_get_headers_and_blocks() {
@@ -506,6 +523,17 @@ mod tests {
             mutated_block.header.prev_blockhash,
             headers[6].block_hash(),
             "invalid block is at height 7",
+        );
+    }
+
+    #[test]
+    fn test_get_witness_mutated_block() {
+        let block = witness_mutated_block_h7();
+
+        assert!(block.check_merkle_root(), "txid merkle root is intact");
+        assert!(
+            !block.check_witness_commitment(),
+            "witness commitment is invalid",
         );
     }
 
