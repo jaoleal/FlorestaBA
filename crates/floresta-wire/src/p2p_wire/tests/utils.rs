@@ -289,6 +289,83 @@ pub fn mutated_block_h7() -> Block {
     ).unwrap()
 }
 
+/// The peer id of the single simulated peer registered by [`setup_unit_node`]
+pub const PEER_TEST: u32 = 0;
+
+/// Registers a simulated peer on a non-running unit-test node, offering all services and
+/// eligible for latency-based selection.
+pub fn register_test_peer(
+    node: &mut UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode>,
+    peer_id: u32,
+) {
+    let (sender, receiver) = unbounded_channel();
+    let mut peer = create_peer(
+        Vec::new(),
+        HashMap::new(),
+        HashMap::new(),
+        node.node_tx.clone(),
+        sender,
+        receiver,
+        peer_id,
+    );
+
+    // Make the peer eligible for latency-based selection, for any of its services
+    peer.services =
+        ServiceFlags::NETWORK | service_flags::UTREEXO.into() | ServiceFlags::COMPACT_FILTERS;
+    peer.message_times.add(10.0);
+
+    node.peers.insert(peer_id, peer);
+    for service in [
+        service_flags::UTREEXO.into(),
+        ServiceFlags::COMPACT_FILTERS,
+        ServiceFlags::NETWORK,
+    ] {
+        node.peer_by_service
+            .entry(service)
+            .or_default()
+            .push(peer_id);
+    }
+}
+
+/// Creates a non-running [`UtreexoNode`] for unit tests, with the first `num_headers` signet
+/// headers accepted and a single simulated peer ([`PEER_TEST`]) offering all services.
+///
+/// Unlike [`setup_node`], this doesn't run the node's event loop: tests drive the node by
+/// calling its methods directly.
+pub fn setup_unit_node(
+    datadir: impl AsRef<Path>,
+    num_headers: usize,
+) -> UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode> {
+    let config = FlatChainStoreConfig::new(&datadir);
+    let chainstore = FlatChainStore::new(config).unwrap();
+    let mempool = Arc::new(Mutex::new(Mempool::new(1000)));
+    let chain = ChainState::open(chainstore, Network::Signet, AssumeValidArg::Disabled).unwrap();
+    let chain = Arc::new(chain);
+
+    let mut headers = signet_headers();
+    headers.remove(0);
+    headers.truncate(num_headers);
+    for header in headers {
+        chain.accept_header(header).unwrap();
+    }
+
+    let config = get_node_config(&datadir, Network::Signet, false);
+    let kill_signal = Arc::new(RwLock::new(false));
+    let mut node = UtreexoNode::<Arc<ChainState<FlatChainStore>>, SyncNode>::new(
+        config,
+        chain,
+        mempool,
+        None,
+        kill_signal,
+        AddressMan::new(None, &[]),
+    )
+    .unwrap();
+
+    register_test_peer(&mut node, PEER_TEST);
+
+    node
+}
+
 // Nightly Clippy false positive in `Constructor`-generated code:
 // https://github.com/rust-lang/rust-clippy/issues/17525
 #[allow(clippy::redundant_field_names)]
