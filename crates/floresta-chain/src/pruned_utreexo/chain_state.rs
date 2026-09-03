@@ -118,6 +118,13 @@ impl BlockConsumer for Channel<(Block, u32, HashMap<OutPoint, UtxoData>)> {
     }
 }
 
+/// How many blocks we let pile up unflushed while working through a backlog.
+///
+/// This is what we'd have to ask our peers for and validate again if we died right
+/// before the next flush, traded against how often we pay for one. See
+/// [`ChainState::should_flush`].
+const FLUSH_INTERVAL: u32 = 1_000;
+
 /// Internal state of the blockchain managed by `ChainState`.
 pub struct ChainStateInner<PersistedState: ChainStore> {
     /// The acc we use for validation.
@@ -426,6 +433,33 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
         Err(BlockchainError::InvalidTip(
             "Couldn't find a fork point".to_string(),
         ))
+    }
+
+    /// Whether connecting a block at `height` is worth following with a flush.
+    ///
+    /// Flushing re-checksums the store, and that walks the files as we allocated
+    /// them rather than as we filled them, so it costs the same whether one block
+    /// changed or a thousand. We can't make it cheaper, since the checksum has to
+    /// describe what we wrote for [`ChainStore::check_integrity`] to accept it when
+    /// we open the store again, so we make it rarer instead.
+    ///
+    /// Two things want flushing, and they pull in opposite directions: the less we
+    /// do it, the more blocks we have to fetch and validate again if we die before
+    /// the next one. Bitcoin Core settles this on a timer, flushing at most hourly
+    /// regardless of how many blocks it connected. We have no clock here, so we
+    /// count blocks instead.
+    fn should_flush(&self, height: u32) -> Result<bool, BlockchainError> {
+        // There's nothing left to connect, so we're about to sit idle waiting for
+        // the next block. That's the cheapest moment to pay for this, and the one
+        // where being up to date on disk is worth the most.
+        if !self.is_in_ibd() && height >= self.get_best_block()?.0 {
+            return Ok(true);
+        }
+
+        // Otherwise we're working through a backlog, either the IBD or a catch-up
+        // after being away. Flushing every block here is what made connecting them
+        // crawl, so only bound how much we'd have to redo.
+        Ok(height % FLUSH_INTERVAL == 0)
     }
 
     /// Changes the acc we are using to validate blocks.
@@ -1409,7 +1443,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         #[cfg(feature = "metrics")]
         metrics::get_metrics().block_height.set(height.into());
 
-        if !self.is_in_ibd() || height % 100_000 == 0 {
+        if self.should_flush(height)? {
             self.flush()?;
         }
 

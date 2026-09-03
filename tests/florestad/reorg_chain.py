@@ -11,7 +11,22 @@ accumulator to make sure they are the same.
 
 import pytest
 
+# Florestad used to only ask its peers where the tip was every
+# `NodeContext::ASSUME_STALE`, 15 minutes. Utreexod announces the reorg once,
+# while we're still finishing the IBD, and never repeats itself, so we would sit
+# on the pre-reorg chain until then. It asks on its way out of the IBD and
+# whenever a peer finishes its handshake now, which is what this test leans on.
 
+# Connecting a run of blocks used to take about 14 seconds each, because every
+# one of them flushed the chainstore, which re-checksums the files as they were
+# allocated rather than as they were filled. The flush waits until there is
+# nothing left to connect now, so a backlog costs one flush instead of one per
+# block, which is what lets this test finish inside its wait.
+#
+# That last flush is still slow, ~13s here on a debug build, and it stops the
+# node while it runs since `process_pending_blocks` holds the loop. Worth
+# revisiting: the checksum walks the whole allocated store, so it costs the same
+# on an empty regtest chain as it would on a full one.
 @pytest.mark.florestad
 def test_reorg_chain(setup_logging, florestad_utreexod, node_manager):
     """Mine blocks, trigger a reorg and assert both nodes end up on the same chain."""

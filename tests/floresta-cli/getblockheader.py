@@ -13,7 +13,14 @@ import pytest
 from requests.exceptions import HTTPError
 from test_framework.util import compare_fields
 
-TIMEOUT_SECONDS = 20
+# The class scaffolding below matches getblock.py's, since both drive the same
+# three-node chain and compare a block against bitcoind.
+# pylint: disable=duplicate-code
+
+# Enough to cross a few regtest retargets, which happen every 150 blocks, while
+# staying small enough that everyone validates it quickly. Bigger chains only
+# make utreexod and florestad thrash the disk against each other.
+CHAIN_BLOCKS = 200
 
 
 class TestGetBlockheader:
@@ -25,9 +32,10 @@ class TestGetBlockheader:
     log: Any = None
     node_manager: Any = None
 
+    # pylint: disable=too-many-arguments too-many-positional-arguments
     @pytest.mark.rpc
     def test_get_blockheader(
-        self, setup_logging, node_manager, florestad_node, bitcoind_node
+        self, setup_logging, node_manager, florestad_node, bitcoind_node, utreexod_node
     ):
         """
         Test the getblockheader RPC command. Verifies that Florestad's getblockheader RPC responses
@@ -52,25 +60,28 @@ class TestGetBlockheader:
         with pytest.raises(HTTPError):
             self.florestad.rpc.get_blockheader(invalid_hash, True)
 
-        self.bitcoind.rpc.generate_block(2017)
+        # Utreexod mines, so it holds the proofs Florestad needs to validate the
+        # chain. Without them Florestad accepts the headers but never validates
+        # a block, and its tip stays on the genesis. The whole chain is mined
+        # before connecting, otherwise the last blocks are announced while
+        # Florestad is still on IBD and it won't ask for them again.
+        utreexod_node.rpc.generate(CHAIN_BLOCKS)
         # Sleep is required to ensure blocks have different timestamps. In regtest, blocks are mined
         # almost instantaneously, so without this sleep, block timestamps would be nearly identical.
         # We need different timestamps to cause the median time of recent blocks to be different
         # from earlier blocks, which is necessary for proper testing.
         time.sleep(1)
-        self.bitcoind.rpc.generate_block(5)
+        utreexod_node.rpc.generate(5)
 
+        self.node_manager.connect_nodes(self.florestad, utreexod_node)
+        time.sleep(3)
+        self.node_manager.connect_nodes(self.bitcoind, utreexod_node)
+        time.sleep(1)
         self.node_manager.connect_nodes(self.florestad, self.bitcoind)
 
-        block_count = self.bitcoind.rpc.get_block_count()
-        start = time.time()
-        while time.time() - start < TIMEOUT_SECONDS:
-            florestad_count = self.florestad.rpc.get_block_count()
-            if florestad_count == block_count:
-                break
-            time.sleep(0.5)
+        self.node_manager.wait_for_sync_nodes(is_finished_ibd=False)
 
-        assert florestad_count == block_count
+        block_count = self.bitcoind.rpc.get_block_count()
 
         self.log.info("Testing getblockheader RPC in the genesis block")
         self.validate_block_header(0)

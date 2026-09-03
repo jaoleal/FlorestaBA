@@ -23,7 +23,14 @@ from test_framework.constants import (
     WALLET_DESCRIPTOR_INTERNAL,
 )
 from test_framework.node import Node, NodeType
-from test_framework.util import Utility
+from test_framework.util import Utility, wait_until
+
+# The default arguments for an `utreexod` acting as a server for our tests.
+UTREEXOD_ARGS = [
+    f"--miningaddr={WALLET_ADDRESS}",
+    "--utreexoproofindex",
+    "--prune=0",
+]
 
 
 def pytest_addoption(parser):
@@ -167,11 +174,7 @@ def utreexod_node(node_manager) -> Node:
     """Single `utreexod` node with default configurations, started and ready for testing"""
     node = node_manager.add_node_extra_args(
         variant=NodeType.UTREEXOD,
-        extra_args=[
-            f"--miningaddr={WALLET_ADDRESS}",
-            "--utreexoproofindex",
-            "--prune=0",
-        ],
+        extra_args=UTREEXOD_ARGS,
     )
     node_manager.run_node(node)
     return node
@@ -243,6 +246,85 @@ def florestad_bitcoind_utreexod_with_chain(
         return florestad_node, bitcoind_node, utreexod_node
 
     return _create_nodes_with_chain
+
+
+@pytest.fixture
+def florestad_with_unvalidated_headers(
+    florestad_bitcoind_utreexod_with_chain, node_manager
+) -> Callable[..., tuple[Node, Node, int, int]]:
+    """
+    Factory that leaves florestad holding headers it can never validate.
+
+    Florestad needs the utreexo proof shipped with a block to validate it, so
+    stopping the only utreexo peer and mining the rest on bitcoind advances its
+    header tip while its validated tip stays put. That is the only moment the
+    two tips differ, which is what anything reporting "the best block" must be
+    checked against.
+
+    Returns the two surviving nodes, the validated height and the header height.
+    """
+
+    def _create_unvalidated_headers(
+        blocks: int = 20, unvalidated: int = 5
+    ) -> tuple[Node, Node, int, int]:
+        florestad, bitcoind, utreexod = florestad_bitcoind_utreexod_with_chain(blocks)
+        node_manager.wait_for_sync_nodes()
+
+        utreexod.stop()
+        bitcoind.rpc.generate_block(unvalidated)
+
+        headers = blocks + unvalidated
+        wait_until(
+            lambda: florestad.rpc.get_blockchain_info()["headers"] == headers,
+            error_msg=f"Florestad didn't accept the {unvalidated} new headers",
+        )
+
+        return florestad, bitcoind, blocks, headers
+
+    return _create_unvalidated_headers
+
+
+@pytest.fixture
+def florestad_bitcoind_utreexod_with_filters(
+    florestad_node, bitcoind_node, add_node_with_extra_args, node_manager
+) -> Callable[..., tuple[Node, Node, Node]]:
+    """
+    Variant of `florestad_bitcoind_utreexod_with_chain` whose utreexod serves
+    compact block filters.
+
+    Utreexod only advertises NODE_COMPACT_FILTERS when started with
+    `--cfilters`, and florestad needs such a peer to download the filters that
+    back RPCs scanning them, like `findtxout`.
+    """
+
+    def _create_nodes_with_filters(
+        blocks: int = 100,
+        floresta_descriptors: List[str] | None = None,
+    ) -> tuple[Node, Node, Node]:
+        if floresta_descriptors is None:
+            floresta_descriptors = [
+                WALLET_DESCRIPTOR_EXTERNAL,
+                WALLET_DESCRIPTOR_INTERNAL,
+            ]
+
+        for descriptor in floresta_descriptors:
+            florestad_node.rpc.load_descriptor(descriptor)
+
+        utreexod_node = add_node_with_extra_args(
+            variant=NodeType.UTREEXOD,
+            extra_args=UTREEXOD_ARGS + ["--cfilters"],
+        )
+        utreexod_node.rpc.generate(blocks)
+
+        node_manager.connect_nodes(florestad_node, utreexod_node)
+        time.sleep(3)
+        node_manager.connect_nodes(bitcoind_node, utreexod_node)
+        time.sleep(1)
+        node_manager.connect_nodes(florestad_node, bitcoind_node)
+
+        return florestad_node, bitcoind_node, utreexod_node
+
+    return _create_nodes_with_filters
 
 
 @pytest.fixture(scope="class")
@@ -351,11 +433,7 @@ def shared_utreexod_node(shared_node_manager) -> Node:
     """Single utreexod node shared across all methods in a test class."""
     node = shared_node_manager.add_node_extra_args(
         variant=NodeType.UTREEXOD,
-        extra_args=[
-            f"--miningaddr={WALLET_ADDRESS}",
-            "--utreexoproofindex",
-            "--prune=0",
-        ],
+        extra_args=UTREEXOD_ARGS,
     )
     shared_node_manager.run_node(node)
     return node

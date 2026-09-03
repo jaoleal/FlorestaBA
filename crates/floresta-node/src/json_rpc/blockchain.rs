@@ -30,8 +30,6 @@ use floresta_chain::extensions::HeaderExt;
 use floresta_chain::extensions::WorkExt;
 use floresta_wire::node_interface::ChainMethods;
 use miniscript::descriptor::checksum;
-use serde_json::Value;
-use serde_json::json;
 use tracing::debug;
 
 use super::res::GetBlockHeaderRes;
@@ -41,7 +39,6 @@ use super::server::RpcChain;
 use super::server::RpcImpl;
 use crate::json_rpc::res::GetBlockRes;
 use crate::json_rpc::res::RescanConfidence;
-use crate::json_rpc::server::SERIALIZATION_EXPECT_MSG;
 use crate::json_rpc::server::to_core_asm_string;
 
 impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
@@ -179,15 +176,31 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
 // blockchain rpcs
 impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
+    /// The height and hash of the last block we validated.
+    ///
+    /// Bitcoin Core answers with its chainstate tip everywhere it reports "the best
+    /// block", so this is what we must report as well. Our best header can be far
+    /// ahead of it, since we accept headers before having the blocks they describe,
+    /// and it is reported separately as `getblockchaininfo`'s `headers`.
+    fn get_validated_tip(&self) -> Result<(u32, BlockHash), JsonRpcError> {
+        let height = self
+            .chain
+            .get_validation_index()
+            .map_err(|_| JsonRpcError::Chain)?;
+
+        let hash = self
+            .chain
+            .get_block_hash(height)
+            .map_err(|_| JsonRpcError::BlockNotFound)?;
+
+        Ok((height, hash))
+    }
+
     // dumputxoutset
 
     // getbestblockhash
     pub(super) fn get_best_block_hash(&self) -> Result<BlockHash, JsonRpcError> {
-        Ok(self
-            .chain
-            .get_best_block()
-            .map_err(|_| JsonRpcError::Chain)?
-            .1)
+        Ok(self.get_validated_tip()?.1)
     }
 
     // getblock
@@ -253,18 +266,17 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     // `headers` tracks the best-known header tip; `blocks` tracks the validated
     // tip. They can diverge mid-IBD and coincide once sync completes.
     pub(super) fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, JsonRpcError> {
-        let (height, hash) = self
+        // Only `headers` describes our best header, everything else here is derived
+        // from the chain we validated, like Bitcoin Core does with its chainstate tip.
+        let (height, _) = self
             .chain
             .get_best_block()
             .map_err(|_| JsonRpcError::Chain)?;
-        let validated = self
-            .chain
-            .get_validation_index()
-            .map_err(|_| JsonRpcError::Chain)?;
+        let (validated, validated_hash) = self.get_validated_tip()?;
         let initial_block_download = self.chain.is_in_ibd();
         let latest_header = self
             .chain
-            .get_block_header(&hash)
+            .get_block_header(&validated_hash)
             .map_err(|_| JsonRpcError::Chain)?;
         let chain_work = latest_header
             .calculate_chain_work(&self.chain)?
@@ -278,7 +290,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
         let blocks = i64::from(validated);
         let headers = i64::from(height);
-        let best_block_hash = hash.to_string();
+        let best_block_hash = validated_hash.to_string();
         let bits = latest_header.get_bits_hex();
         let target = latest_header.get_target_hex();
         let difficulty = latest_header.get_difficulty();
@@ -327,7 +339,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
     // getblockcount
     pub(super) fn get_block_count(&self) -> Result<u32, JsonRpcError> {
-        self.chain.get_height().map_err(|_| JsonRpcError::Chain)
+        Ok(self.get_validated_tip()?.0)
     }
 
     // getblockfilter
@@ -557,8 +569,16 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         ) {
             (Some(cached_tx), Some(height), Some(txout)) => {
                 let is_coinbase = cached_tx.tx.is_coinbase();
-                let Ok((bestblock_height, bestblock_hash)) = self.chain.get_best_block() else {
-                    return Err(JsonRpcError::BlockNotFound);
+
+                // An utxo only exists as far as we validated, so both fields below are
+                // relative to the last block we validated.
+                let (bestblock_height, bestblock_hash) = self.get_validated_tip()?;
+
+                // A block we haven't validated yet doesn't confirm anything, even if the
+                // wallet already cached it while scanning the block filters.
+                let confirmations = match bestblock_height.checked_sub(height) {
+                    Some(depth) => depth + 1,
+                    None => 0,
                 };
 
                 let script = txout.script_pubkey.as_script();
@@ -587,7 +607,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
 
                 Some(GetTxOut {
                     best_block: bestblock_hash.to_string(),
-                    confirmations: bestblock_height - height + 1,
+                    confirmations,
                     value: txout.value.to_btc(),
                     script_pubkey,
                     coinbase: is_coinbase,
@@ -670,10 +690,10 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         txid: Txid,
         vout: u32,
         script: ScriptBuf,
-        height: u32,
-    ) -> Result<Value, JsonRpcError> {
-        if let Some(txout) = self.wallet.get_utxo(&OutPoint { txid, vout }) {
-            return Ok(serde_json::to_value(txout).expect(SERIALIZATION_EXPECT_MSG));
+        height_hint: u32,
+    ) -> Result<Option<GetTxOut>, JsonRpcError> {
+        if let Some(txout) = self.get_tx_out(txid, vout, false)? {
+            return Ok(Some(txout));
         }
 
         // if we are on IBD, we don't have any filters to find this txout.
@@ -686,29 +706,30 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             return Err(JsonRpcError::NoBlockFilters);
         };
 
+        debug!("Searching for {txid}:{vout}");
+
         self.wallet.cache_address(script.clone());
         let filter_key = script.to_bytes();
         let candidates = cfilters
             .match_any(
                 vec![filter_key.as_slice()],
-                Some(height),
+                Some(height_hint),
                 None,
                 self.chain.clone(),
             )
             .map_err(|e| JsonRpcError::Filters(e.to_string()))?;
 
         for candidate in candidates {
-            let candidate = self.node.get_block(candidate).await;
-            let candidate = match candidate {
-                Err(e) => {
-                    return Err(JsonRpcError::Node(e.to_string()));
-                }
-                Ok(None) => {
-                    return Err(JsonRpcError::Node(format!(
-                        "BUG: block {candidate:?} is a match in our filters, but we can't get it?"
-                    )));
-                }
-                Ok(Some(candidate)) => candidate,
+            let candidate = self
+                .node
+                .get_block(candidate)
+                .await
+                .map_err(|e| JsonRpcError::Node(e.to_string()))?;
+
+            let Some(candidate) = candidate else {
+                return Err(JsonRpcError::Node(format!(
+                    "BUG: block {candidate:?} is a match in our filters, but we can't get it?"
+                )));
             };
 
             let Ok(Some(height)) = self.chain.get_block_height(&candidate.block_hash()) else {
@@ -718,11 +739,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
             self.wallet.block_process(&candidate, height);
         }
 
-        let val = match self.get_tx_out(txid, vout, false)? {
-            Some(gettxout) => json!(gettxout),
-            None => json!({}),
-        };
-        Ok(val)
+        self.get_tx_out(txid, vout, false)
     }
 
     // getroots
