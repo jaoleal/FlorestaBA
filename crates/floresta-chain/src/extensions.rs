@@ -17,8 +17,46 @@ use floresta_common::prelude::String;
 use floresta_common::prelude::Vec;
 
 use crate::BlockchainInterface;
+use crate::pruned_utreexo::merkle::ConsensusMerkle;
 
 const MEDIAN_TIME_PAST_BLOCK_COUNT: usize = 11;
+
+/// Provides additional methods for working with [`Block`] objects.
+pub trait BlockExt {
+    /// Computes this block's hash from the transaction data up, rather than trusting the
+    /// merkle root committed in the header.
+    ///
+    /// [`Block::block_hash`] only hashes the header, so it can't tell whether the transaction
+    /// data matches the root the header claims. This method recomputes the merkle root from
+    /// the txids with [`ConsensusMerkle`], which also detects [CVE-2012-2459]
+    /// duplicate-sibling trees (a mutated `txdata` producing the same root, which
+    /// [`Block::check_merkle_root`] accepts).
+    ///
+    /// Returns `None` for an empty transaction list or a mutated merkle tree, since no valid
+    /// block can produce either. Witness data is not covered: it is committed by the witness
+    /// commitment, not by the block hash (see [`Block::check_witness_commitment`]).
+    ///
+    /// [CVE-2012-2459]: https://www.cve.org/CVERecord?id=CVE-2012-2459
+    fn calculate_block_hash(&self) -> Option<BlockHash>;
+}
+
+impl BlockExt for Block {
+    fn calculate_block_hash(&self) -> Option<BlockHash> {
+        let txids: Vec<_> = self.txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let (merkle_root, mutated) = ConsensusMerkle::calculate_root(&txids)?;
+
+        if mutated {
+            return None;
+        }
+
+        let header = Header {
+            merkle_root,
+            ..self.header
+        };
+
+        Some(header.block_hash())
+    }
+}
 
 pub trait Bip30UnspendableExt {
     /// Returns true if the coinbase output in this block is BIP-30 unspendable.
@@ -744,5 +782,50 @@ mod tests {
 
         assert_eq!(work.to_string_hex(), expected_hex_string);
         assert_eq!(work, expected_work);
+    }
+
+    /// A minimal transaction whose txid is unique per `lock_time`
+    fn dummy_tx(lock_time: u32) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
+            input: Vec::new(),
+            output: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_calculate_block_hash() {
+        // A block whose header commits to the merkle root of its three transactions
+        let txdata: Vec<_> = (0..3).map(dummy_tx).collect();
+        let mut block = Block {
+            header: get_genesis_header(),
+            txdata,
+        };
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+
+        // The ground-up hash matches the header hash for pristine txdata
+        assert_eq!(block.calculate_block_hash(), Some(block.block_hash()));
+
+        // Mutating a transaction changes the computed hash, while `block_hash` is unchanged
+        let mut mutated = block.clone();
+        mutated.txdata[2] = dummy_tx(42);
+        let computed = mutated.calculate_block_hash().unwrap();
+        assert_ne!(computed, mutated.block_hash());
+
+        // CVE-2012-2459: duplicating the last transaction yields the same merkle root, so
+        // `Block::check_merkle_root` accepts the mutated txdata, but the ground-up hash
+        // detects the duplicate-sibling tree
+        let mut duplicated = block.clone();
+        duplicated.txdata.push(duplicated.txdata[2].clone());
+        assert!(
+            duplicated.check_merkle_root(),
+            "rust-bitcoin misses this mutation",
+        );
+        assert_eq!(duplicated.calculate_block_hash(), None);
+
+        // No valid block has an empty transaction list
+        block.txdata.clear();
+        assert_eq!(block.calculate_block_hash(), None);
     }
 }

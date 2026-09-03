@@ -39,7 +39,9 @@ use super::chainparams::ChainParams;
 use super::consensus::Consensus;
 use super::error::BlockValidationErrors;
 use super::error::BlockchainError;
+use crate::CompactLeafData;
 use crate::extensions::HeaderExt;
+use crate::proof_util;
 use crate::pruned_utreexo::IBDState;
 use crate::pruned_utreexo::utxo_data::UtxoData;
 
@@ -151,18 +153,30 @@ impl PartialChainStateInner {
         self.median_time_past(height.saturating_sub(1))
     }
 
-    /// Process a block, given the proof, inputs, and deleted hashes.
-    /// If we find an error that proves the assumed chain invalid, we save it.
+    /// Fully validates a block and connects it to this partial chain, given its utreexo
+    /// inclusion `proof` and the `leaf_data` for the UTXOs it spends. In order, this:
+    ///
+    /// 1. Runs the structural checks ([`Self::validate_block_structure`]), authenticating the
+    ///    transaction data against the block header
+    /// 2. Reconstructs the spent UTXOs from the peer-supplied `leaf_data`
+    /// 3. Verifies `proof` against our accumulator, authenticating the reconstructed UTXOs,
+    ///    and computes the updated accumulator
+    /// 4. Validates the block transactions ([`Self::validate_block_transactions`])
+    /// 5. Updates the state with the new height and accumulator
+    ///
+    /// If we find an error that proves the assumed chain invalid, we save it. Errors caused by
+    /// peer-supplied data (a mutated block payload or bad utreexo data) don't poison this
+    /// chain, since another peer can still provide the valid data.
     pub fn process_block(
         &mut self,
         block: &bitcoin::Block,
         proof: rustreexo::proof::Proof,
-        inputs: HashMap<bitcoin::OutPoint, UtxoData>,
-        del_hashes: Vec<bitcoin::hashes::sha256::Hash>,
+        leaf_data: &[CompactLeafData],
     ) -> Result<u32, BlockchainError> {
         let height = self.current_height + 1;
 
-        if let Err(BlockchainError::BlockValidation(e)) = self.validate_block(block, height, inputs)
+        if let Err(BlockchainError::BlockValidation(e)) =
+            self.validate_block_structure(block, height)
         {
             // These errors may describe a mutated payload for an otherwise valid header.
             // Another peer can still provide the valid block, so don't poison this chain.
@@ -175,6 +189,17 @@ impl PartialChainStateInner {
             return Err(BlockchainError::BlockValidation(e));
         }
 
+        // Reconstruct the UTXOs spent by this block from the peer-supplied leaf data. Errors
+        // here mean bad peer data, not an invalid block, so this chain is not poisoned.
+        let (del_hashes, inputs) =
+            proof_util::process_proof(leaf_data, &block.txdata, height, |h| {
+                self.get_block(h)
+                    .map(|header| header.block_hash())
+                    .ok_or(BlockchainError::BlockNotPresent)
+            })?;
+
+        // Verify the utreexo inclusion proof, authenticating the reconstructed UTXOs against
+        // our accumulator before they are used for transaction validation.
         let acc = match Consensus::update_acc(&self.current_acc, block, height, proof, del_hashes) {
             Ok(acc) => acc,
             Err(_) => {
@@ -182,6 +207,13 @@ impl PartialChainStateInner {
                 return Err(BlockchainError::InvalidUtreexoProof);
             }
         };
+
+        if let Err(BlockchainError::BlockValidation(e)) =
+            self.validate_block_transactions(block, height, inputs)
+        {
+            self.error = Some(e.clone());
+            return Err(BlockchainError::BlockValidation(e));
+        }
 
         // ... If we came this far, we consider this block valid ...
 
@@ -197,12 +229,21 @@ impl PartialChainStateInner {
         Ok(height)
     }
 
-    /// Check whether a block is valid
-    fn validate_block(
+    /// Runs the structural checks on a block, which require neither the UTXOs it spends nor
+    /// script execution. In order, this verifies that:
+    ///
+    /// 1. The header merkle root commits to the block's transaction data
+    /// 2. The BIP34 coinbase-encoded height matches `height`, once activated
+    /// 3. If there are SegWit transactions, the witness commitment is present and correct
+    /// 4. The total block weight is within the 4,000,000 WU limit
+    /// 5. The block extends its ancestor header in this interval
+    ///
+    /// Once this passes, the block data is authenticated by its header, so it is safe to use
+    /// the transaction data, e.g., to reconstruct the spent UTXOs from the utreexo leaf data.
+    fn validate_block_structure(
         &self,
         block: &bitcoin::Block,
         height: u32,
-        inputs: HashMap<bitcoin::OutPoint, UtxoData>,
     ) -> Result<(), BlockchainError> {
         self.consensus.check_block(block, height)?;
 
@@ -211,7 +252,33 @@ impl PartialChainStateInner {
             Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?;
         }
 
-        // Validate block transactions
+        Ok(())
+    }
+
+    /// Validates the block transactions given the UTXOs they spend. In order, this verifies
+    /// that:
+    ///
+    /// 1. The block has at least one transaction, and the first (and only the first) one is a
+    ///    coinbase with a single null-prevout input and a valid scriptSig size
+    /// 2. Every transaction is final (lock time and sequence checks, using the previous
+    ///    block's median time past as the BIP113 cutoff)
+    /// 3. Every transaction passes the context-free checks: non-empty inputs and outputs,
+    ///    script size and sigop limits, no duplicate inputs and no value overflows
+    /// 4. Every non-coinbase input spends a UTXO present in `inputs` that was not already
+    ///    spent within the block, only spending matured coinbase outputs, and no transaction
+    ///    creates more coins than it spends
+    /// 5. Input scripts are valid, when script validation is enabled for this interval
+    ///    (requires the `bitcoinkernel` feature)
+    /// 6. The coinbase reward doesn't exceed the block subsidy plus the collected fees
+    ///
+    /// This doesn't check the block structure (see [`Self::validate_block_structure`]) nor
+    /// the utreexo inclusion proof, which authenticates the spent `inputs`.
+    fn validate_block_transactions(
+        &self,
+        block: &bitcoin::Block,
+        height: u32,
+        inputs: HashMap<bitcoin::OutPoint, UtxoData>,
+    ) -> Result<(), BlockchainError> {
         let subsidy = self.consensus.get_subsidy(height);
         let lock_time_cutoff =
             self.consensus
@@ -298,11 +365,9 @@ impl UpdatableChainstate for PartialChainState {
         &self,
         block: &bitcoin::Block,
         proof: rustreexo::proof::Proof,
-        inputs: HashMap<bitcoin::OutPoint, UtxoData>,
-        del_hashes: Vec<bitcoin::hashes::sha256::Hash>,
+        leaf_data: &[CompactLeafData],
     ) -> Result<u32, BlockchainError> {
-        self.inner_mut()
-            .process_block(block, proof, inputs, del_hashes)
+        self.inner_mut().process_block(block, proof, leaf_data)
     }
 
     fn get_root_hashes(&self) -> Vec<BitcoinNodeHash> {
@@ -513,8 +578,6 @@ impl From<PartialChainStateInner> for PartialChainState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use bitcoin::Block;
     use bitcoin::CompactTarget;
     use bitcoin::Network;
@@ -546,7 +609,7 @@ mod tests {
             let block = parse_block(block);
 
             let chainstate = get_empty_pchain(vec![genesis.header, block.header]);
-            let res = chainstate.connect_block(&block, Proof::default(), HashMap::new(), vec![]);
+            let res = chainstate.connect_block(&block, Proof::default(), &[]);
 
             match res {
                 Err(BlockchainError::BlockValidation(error)) if error == reason => {}
@@ -682,11 +745,8 @@ mod tests {
         .into();
         parsed_blocks.remove(0);
         for block in parsed_blocks {
-            let proof = Proof::default();
-            let inputs = HashMap::new();
-            let del_hashes = Vec::new();
             chainstate
-                .connect_block(&block, proof, inputs, del_hashes)
+                .connect_block(&block, Proof::default(), &[])
                 .unwrap();
         }
         assert_eq!(chainstate.inner().current_height, 100);
@@ -724,11 +784,8 @@ mod tests {
                 continue;
             }
 
-            let proof = Proof::default();
-            let inputs = HashMap::new();
-            let del_hashes = vec![];
             chainstate1
-                .process_block(block, proof, inputs, del_hashes)
+                .process_block(block, Proof::default(), &[])
                 .unwrap();
         }
 
@@ -762,11 +819,8 @@ mod tests {
         .into();
 
         for block in blocks2 {
-            let proof = Proof::default();
-            let inputs = HashMap::new();
-            let del_hashes = vec![];
             chainstate2
-                .connect_block(block, proof, inputs, del_hashes)
+                .connect_block(block, Proof::default(), &[])
                 .unwrap();
         }
 

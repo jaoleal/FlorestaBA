@@ -409,7 +409,10 @@ mod utreexo_proof_tests {
         }
 
         state
-            .validate_block_no_acc(&block, height, utxos)
+            .validate_block_structure(&block, height)
+            .expect("Block structure must be valid");
+        state
+            .validate_block_transactions(&block, height, utxos)
             .expect("Block validation must pass for the given UTXOs map");
 
         // STEP 2: Add a tx that tries to spend an UTXO created later in the block; utreexo fails
