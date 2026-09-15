@@ -83,6 +83,12 @@ pub const UNSPENDABLE_BIP30_UTXO_91812: [u8; 32] = [
     0xa5, 0x40, 0x30, 0x83, 0xc3, 0x9e, 0xe3, 0x43, 0xb9, 0x85, 0xd5, 0x1f, 0xd0, 0x29, 0x5a, 0xd8,
 ];
 
+/// Maximum amount of time that a block timestamp is allowed to exceed the
+/// current time before the block will be accepted.
+///
+/// Ref: <https://github.com/bitcoin/bitcoin/blob/v31.0/src/chain.h#L29>
+pub const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60; // two hours
+
 /// This struct contains all the information and methods needed to validate a block,
 /// it is used by the [ChainState](crate::ChainState) to validate blocks and transactions.
 #[derive(Debug, Clone)]
@@ -742,6 +748,58 @@ impl Consensus {
         }
 
         Ok(())
+    }
+
+    /// Decodes a compact target the same way as Core's [`DeriveTarget`], rejecting encodings
+    /// that are negative, zero, overflowing 256 bits, or above the `pow_limit`.
+    ///
+    /// We cannot decode with [`Target::from_compact`] directly, as it diverges from Core's
+    /// `arith_uint256::SetCompact` on encodings that the latter flags as invalid: it silently
+    /// wraps the mantissa shift for exponents that overflow 256 bits, and it shifts the sign
+    /// bit into the value for exponents below 3. Both cases can decode small in-range targets
+    /// out of encodings that Core rejects.
+    ///
+    /// [`DeriveTarget`]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/pow.cpp#L146-L159
+    pub fn derive_target(
+        bits: CompactTarget,
+        pow_limit: Target,
+    ) -> Result<Target, BlockValidationErrors> {
+        // TODO: @jaoleal, remove the overflow check when https://github.com/rust-bitcoin/rust-bitcoin/pull/6412 makes into a release.
+        // That PR does not fix the second divergence: for exponents below 3, `from_compact`
+        // folds the sign bit into the value (e.g. 0x01800000 decodes to 0x80 where Core
+        // decodes zero), so the sign-bit masking and the `negative` check below must stay
+        // until upstream also handles that case.
+
+        // The encoding is `[1-byte exponent][1-bit sign][23-bit mantissa]`, representing
+        // the value `(-1^sign) * mantissa * 256^(exponent - 3)`.
+        let compact = bits.to_consensus();
+        let mut exponent = compact >> 24;
+        let mut mantissa = compact & 0x007f_ffff;
+
+        // Like SetCompact, fold exponents below 3 into the mantissa
+        if exponent < 3 {
+            mantissa >>= 8 * (3 - exponent);
+            exponent = 3;
+        }
+
+        let negative = mantissa != 0 && (compact & 0x0080_0000) != 0;
+        let overflow = mantissa != 0
+            && (exponent > 34
+                || (mantissa > 0xff && exponent > 33)
+                || (mantissa > 0xffff && exponent > 32));
+
+        if negative || overflow {
+            return Err(BlockValidationErrors::NotEnoughPow);
+        }
+
+        // With the sign bit masked out, `from_compact` decodes exactly like `SetCompact`
+        let target = Target::from_compact(CompactTarget::from_consensus(compact & 0xff7f_ffff));
+
+        if target == Target::ZERO || target > pow_limit {
+            return Err(BlockValidationErrors::NotEnoughPow);
+        }
+
+        Ok(target)
     }
 
     /// Calculates the next target for the proof of work algorithm, given the

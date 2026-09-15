@@ -17,6 +17,7 @@ use core::fmt::Debug;
 use core::fmt::Display;
 use core::fmt::Formatter;
 
+use bitcoin::BlockHash;
 use bitcoin::OutPoint;
 use bitcoin::Txid;
 use floresta_common::impl_error_from;
@@ -133,6 +134,8 @@ pub enum BlockValidationErrors {
     BlockTooBig,
     TooManyCoins,
     NotEnoughPow,
+    BadDiffBits,
+    BadBlockVersion(i32),
     BadMerkleRoot,
     BadWitnessCommitment,
     NotEnoughMoney,
@@ -147,6 +150,8 @@ pub enum BlockValidationErrors {
     UnspendableUTXO,
     BIP94TimeWarp,
     DuplicateInput,
+    TimeTooNew(BlockHash),
+    TimeTooOld,
 }
 
 // Helpful macro for generating a TransactionError
@@ -209,6 +214,15 @@ impl Display for BlockValidationErrors {
             Self::NotEnoughPow => {
                 write!(f, "This block doesn't have enough proof-of-work")
             }
+            Self::BadDiffBits => {
+                write!(
+                    f,
+                    "This header's compact target doesn't match the required difficulty"
+                )
+            }
+            Self::BadBlockVersion(version) => {
+                write!(f, "Outdated block version {version:#010x}")
+            }
             Self::BadMerkleRoot => write!(f, "Wrong merkle root"),
             Self::BadWitnessCommitment => write!(f, "Wrong witness commitment"),
             Self::NotEnoughMoney => {
@@ -246,6 +260,18 @@ impl Display for BlockValidationErrors {
             Self::DuplicateInput => {
                 write!(f, "This transaction has duplicate inputs")
             }
+            Self::TimeTooNew(hash) => {
+                write!(
+                    f,
+                    "The timestamp of header {hash} is more than two hours in the future"
+                )
+            }
+            Self::TimeTooOld => {
+                write!(
+                    f,
+                    "This header's timestamp is not greater than the median time past of the previous 11 blocks"
+                )
+            }
         }
     }
 }
@@ -255,6 +281,8 @@ impl<T: DatabaseError> From<T> for BlockchainBuilderError {
         Self::Database(Box::new(value))
     }
 }
+
+impl Error for BlockValidationErrors {}
 
 impl_error_from!(BlockchainError, TransactionError, TransactionError);
 impl_error_from!(BlockchainError, BlockValidationErrors, BlockValidation);
