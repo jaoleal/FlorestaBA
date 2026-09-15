@@ -9,8 +9,6 @@ use floresta_chain::BlockValidationErrors;
 use floresta_chain::BlockchainError;
 use floresta_chain::ChainBackend;
 use floresta_chain::CompactLeafData;
-use floresta_chain::proof_util;
-use floresta_chain::proof_util::UtreexoLeafError;
 use floresta_common::service_flags;
 use floresta_common::try_and_log;
 use rustreexo::proof::Proof;
@@ -118,7 +116,7 @@ where
         self.inflight.remove(&InflightRequests::Blocks(block_hash));
 
         // Reply and return early if it's a user-requested block. Else continue handling it.
-        let Some(block) = self.check_is_user_block_and_reply(block)? else {
+        let Some(block) = self.check_is_user_block_and_reply(block, peer)? else {
             return Ok(());
         };
 
@@ -219,10 +217,7 @@ where
 
     /// Processes ready blocks in order, stopping at the tip or the first missing block/proof.
     /// Call again when new blocks or proofs arrive.
-    pub(crate) fn process_pending_blocks(&mut self) -> Result<(), WireError>
-    where
-        Chain::Error: From<UtreexoLeafError>,
-    {
+    pub(crate) fn process_pending_blocks(&mut self) -> Result<(), WireError> {
         loop {
             let best_block = self.chain.get_best_block()?.0;
             let next_block = self.chain.get_validation_index()? + 1;
@@ -244,7 +239,7 @@ where
             }
 
             let start = Instant::now();
-            self.process_block(next_block, next_block_hash)?;
+            self.process_block(next_block_hash)?;
 
             let elapsed = start.elapsed().as_secs_f64();
             self.block_sync_avg.add(elapsed);
@@ -262,12 +257,13 @@ where
 
     /// Actually process a block that is ready to be processed.
     ///
-    /// This function will take the next block in our chain, process its proof and validate it.
-    /// If everything is correct, it will connect the block to our chain.
-    fn process_block(&mut self, block_height: u32, block_hash: BlockHash) -> Result<(), WireError>
-    where
-        Chain::Error: From<UtreexoLeafError>,
-    {
+    /// This function takes the next block in our chain and hands it, along with its utreexo
+    /// proof and leaf data, to [`UpdatableChainstate::connect_block`], which fully validates
+    /// the block and connects it to our chain. On failure, the peer responsible for the
+    /// invalid data is punished via [`Self::handle_process_block_error`].
+    ///
+    /// [`UpdatableChainstate::connect_block`]: floresta_chain::pruned_utreexo::UpdatableChainstate::connect_block
+    fn process_block(&mut self, block_hash: BlockHash) -> Result<(), WireError> {
         debug!("processing block {block_hash}");
 
         let inflight = self
@@ -280,20 +276,7 @@ where
         let (leaf_data, proof, utreexo_peer) =
             inflight.aux_data.ok_or(WireError::BlockProofNotFound)?;
 
-        // The leaf data supplied by the utreexo peer is consumed here, before it is
-        // authenticated, so errors must go through the same handling as `connect_block` ones;
-        // otherwise a misbehaving peer would go unpunished and the block would silently stall.
-        let (del_hashes, inputs) =
-            match proof_util::process_proof(&leaf_data, &block.txdata, block_height, |h| {
-                self.chain.get_block_hash(h)
-            }) {
-                Ok(processed) => processed,
-                Err(err) => {
-                    return self.handle_process_block_error(err.into(), block, peer, utreexo_peer);
-                }
-            };
-
-        if let Err(err) = self.chain.connect_block(&block, proof, inputs, del_hashes) {
+        if let Err(err) = self.chain.connect_block(&block, proof, &leaf_data) {
             return self.handle_process_block_error(
                 WireError::Blockchain(err),
                 block,
@@ -306,8 +289,8 @@ where
         Ok(())
     }
 
-    /// Handles an error raised while processing a block, either by [`proof_util::process_proof`]
-    /// or [`UpdatableChainstate::connect_block`], banning the responsible peer if any.
+    /// Handles an error raised by [`UpdatableChainstate::connect_block`] while processing a
+    /// block (including proof processing failures), banning the responsible peer if any.
     ///
     /// Only chain errors caused by peer-supplied data lead to a ban; any other error is our own
     /// fault (e.g. a database failure) and never punishes a peer: non-chain errors are propagated

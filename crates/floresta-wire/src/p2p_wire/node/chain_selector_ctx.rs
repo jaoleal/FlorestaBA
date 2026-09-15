@@ -1039,7 +1039,7 @@ where
             // user request made through the node handle. If it isn't, we punish this
             // peer for sending an unrequested block.
             PeerMessages::Block(block) => {
-                let block = self.check_is_user_block_and_reply(block)?;
+                let block = self.check_is_user_block_and_reply(block, peer)?;
 
                 if block.is_some() {
                     error!("peer {peer} sent us a block we didn't request");

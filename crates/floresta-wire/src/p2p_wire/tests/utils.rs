@@ -9,6 +9,7 @@ use std::time::Instant;
 use bitcoin::Block;
 use bitcoin::BlockHash;
 use bitcoin::Network;
+use bitcoin::Witness;
 use bitcoin::block::Header;
 use bitcoin::consensus::Decodable;
 use bitcoin::consensus::encode;
@@ -282,11 +283,103 @@ pub fn signet_roots() -> HashMap<BlockHash, Vec<u8>> {
     accs
 }
 
+/// Returns the signet block at height 7 with a tampered coinbase witness reserved value.
+///
+/// The witness reserved value is committed by the witness commitment but not by the txid
+/// merkle tree, so the merkle root still matches while the witness commitment doesn't.
+pub fn witness_mutated_block_h7() -> Block {
+    let headers = signet_headers();
+    let mut block = signet_blocks()
+        .remove(&headers[7].block_hash())
+        .expect("we have the first 121 signet blocks");
+
+    block.txdata[0].input[0].witness = Witness::from_slice(&[[0xff_u8; 32]]);
+
+    block
+}
+
 /// Returns a mutated signet block at height 7
 pub fn mutated_block_h7() -> Block {
     deserialize_hex(
         "00000020daf3b60d374b19476461f97540498dcfa2eb7016238ec6b1d022f82fb60100007a7ae65b53cb988c2ec92d2384996713821d5645ffe61c9acea60da75cd5edfa1a944d5fae77031e9dbb050001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025751feffffff0200f2052a01000000160014ef2dceae02e35f8137de76768ae3345d99ca68860000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa2490047304402202b3f946d6447f9bf17d00f3696cede7ee70b785495e5498274ee682a493befd5022045fc0bcf9331073168b5d35507175f9f374a8eba2336873885d12aada67ea5f601000120000000000000000000000000000000000000000000000000000000000000000000000000"
     ).unwrap()
+}
+
+/// The peer id of the single simulated peer registered by [`setup_unit_node`]
+pub const PEER_TEST: u32 = 0;
+
+/// Registers a simulated peer on a non-running unit-test node, offering all services and
+/// eligible for latency-based selection.
+pub fn register_test_peer(
+    node: &mut UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode>,
+    peer_id: u32,
+) {
+    let (sender, receiver) = unbounded_channel();
+    let mut peer = create_peer(
+        Vec::new(),
+        HashMap::new(),
+        HashMap::new(),
+        node.node_tx.clone(),
+        sender,
+        receiver,
+        peer_id,
+    );
+
+    // Make the peer eligible for latency-based selection, for any of its services
+    peer.services =
+        ServiceFlags::NETWORK | service_flags::UTREEXO.into() | ServiceFlags::COMPACT_FILTERS;
+    peer.message_times.add(10.0);
+
+    node.peers.insert(peer_id, peer);
+    for service in [
+        service_flags::UTREEXO.into(),
+        ServiceFlags::COMPACT_FILTERS,
+        ServiceFlags::NETWORK,
+    ] {
+        node.peer_by_service
+            .entry(service)
+            .or_default()
+            .push(peer_id);
+    }
+}
+
+/// Creates a non-running [`UtreexoNode`] for unit tests, with the first `num_headers` signet
+/// headers accepted and a single simulated peer ([`PEER_TEST`]) offering all services.
+///
+/// Unlike [`setup_node`], this doesn't run the node's event loop: tests drive the node by
+/// calling its methods directly.
+pub fn setup_unit_node(
+    datadir: impl AsRef<Path>,
+    num_headers: usize,
+) -> UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode> {
+    let config = FlatChainStoreConfig::new(&datadir);
+    let chainstore = FlatChainStore::new(config).unwrap();
+    let mempool = Arc::new(Mutex::new(Mempool::new(1000)));
+    let chain = ChainState::open(chainstore, Network::Signet, AssumeValidArg::Disabled).unwrap();
+    let chain = Arc::new(chain);
+
+    let mut headers = signet_headers();
+    headers.remove(0);
+    headers.truncate(num_headers);
+    for header in headers {
+        chain.accept_header(header).unwrap();
+    }
+
+    let config = get_node_config(&datadir, Network::Signet, false);
+    let kill_signal = Arc::new(RwLock::new(false));
+    let mut node = UtreexoNode::<Arc<ChainState<FlatChainStore>>, SyncNode>::new(
+        config,
+        chain,
+        mempool,
+        None,
+        kill_signal,
+        AddressMan::new(None, &[]),
+    )
+    .unwrap();
+
+    register_test_peer(&mut node, PEER_TEST);
+
+    node
 }
 
 // Nightly Clippy false positive in `Constructor`-generated code:
@@ -389,6 +482,7 @@ mod tests {
     use super::signet_blocks;
     use super::signet_headers;
     use super::signet_roots;
+    use super::witness_mutated_block_h7;
 
     #[test]
     fn test_get_headers_and_blocks() {
@@ -429,6 +523,17 @@ mod tests {
             mutated_block.header.prev_blockhash,
             headers[6].block_hash(),
             "invalid block is at height 7",
+        );
+    }
+
+    #[test]
+    fn test_get_witness_mutated_block() {
+        let block = witness_mutated_block_h7();
+
+        assert!(block.check_merkle_root(), "txid merkle root is intact");
+        assert!(
+            !block.check_witness_commitment(),
+            "witness commitment is invalid",
         );
     }
 

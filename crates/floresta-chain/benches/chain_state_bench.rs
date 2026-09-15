@@ -241,9 +241,7 @@ fn connect_blocks_benchmark(c: &mut Criterion) {
             setup_chain,
             |chain| {
                 blocks.iter().for_each(|block| {
-                    chain
-                        .connect_block(block, Proof::default(), HashMap::new(), Vec::new())
-                        .unwrap();
+                    chain.connect_block(block, Proof::default(), &[]).unwrap();
                 })
             },
             BatchSize::SmallInput,
@@ -266,7 +264,12 @@ fn validate_full_block_benchmark(c: &mut Criterion) {
     c.bench_function("validate_block_866342", |b| {
         b.iter_batched(
             || inputs.clone(),
-            |inputs| chain.validate_block_no_acc(&block, HEIGHT, inputs).unwrap(),
+            |inputs| {
+                chain.validate_block_structure(&block, HEIGHT).unwrap();
+                chain
+                    .validate_block_transactions(&block, HEIGHT, inputs)
+                    .unwrap()
+            },
             BatchSize::LargeInput,
         )
     });
@@ -299,7 +302,12 @@ fn validate_many_inputs_block_benchmark(c: &mut Criterion) {
     group.bench_function("validate_block_367891", |b| {
         b.iter_batched(
             || inputs.clone(),
-            |inputs| chain.validate_block_no_acc(&block, HEIGHT, inputs).unwrap(),
+            |inputs| {
+                chain.validate_block_structure(&block, HEIGHT).unwrap();
+                chain
+                    .validate_block_transactions(&block, HEIGHT, inputs)
+                    .unwrap()
+            },
             BatchSize::LargeInput,
         )
     });

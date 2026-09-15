@@ -5,6 +5,7 @@ use std::time::Instant;
 use bitcoin::Block;
 use bitcoin::p2p::ServiceFlags;
 use floresta_chain::ChainBackend;
+use floresta_chain::extensions::BlockExt;
 use floresta_common::try_and_log;
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -16,6 +17,7 @@ use super::UtreexoNode;
 use crate::block_proof::Bitmap;
 use crate::node::running_ctx::RunningNode;
 use crate::node_context::NodeContext;
+use crate::node_context::PeerId;
 use crate::node_handle::NodeHandle;
 use crate::node_handle::NodeResponse;
 use crate::node_handle::UserRequest;
@@ -214,27 +216,78 @@ where
     /// Check if this block request is made by a user through the user interface and answer it
     /// back to the user if so.
     ///
+    /// A mutated block is never handed to the user: `peer` is banned and the block is
+    /// re-requested from another peer, keeping the user request open. The block hash is
+    /// recomputed from the transaction data up (see [`BlockExt::calculate_block_hash`]), as
+    /// the hash of a mutated block still matches the requested one, and the witness
+    /// commitment is checked separately, since witness data isn't covered by the block hash.
+    /// Blocks headed to `connect_block` don't need any of this, as the structural checks
+    /// there catch the mutation and punish the peer.
+    ///
     /// This function will return the given block if it isn't a user request. This is to avoid cloning
     /// the block.
     pub(crate) fn check_is_user_block_and_reply(
         &mut self,
         block: Block,
+        peer: PeerId,
     ) -> Result<Option<Block>, WireError> {
-        // If this block is a request made through the user interface, send it back to the
-        // user.
-        if let Some(request) = self
+        let block_hash = block.block_hash();
+
+        if !self
             .inflight_user_requests
-            .remove(&UserRequest::Block(block.block_hash()))
+            .contains_key(&UserRequest::Block(block_hash))
         {
-            debug!("answering user request for block {}", block.block_hash());
-            request
-                .2
-                .send(NodeResponse::Block(Some(block)))
-                .map_err(|_| WireError::ResponseSendError)?;
+            return Ok(Some(block));
+        }
+
+        let is_mutated =
+            block.calculate_block_hash() != Some(block_hash) || !block.check_witness_commitment();
+
+        if is_mutated {
+            warn!("Peer {peer} sent us a mutated block {block_hash} for a user request");
+
+            // Ban the peer first, so the re-request below can't pick it again
+            self.disconnect_and_ban(peer)?;
+            self.retry_user_block_request(block_hash);
 
             return Ok(None);
         }
 
-        Ok(Some(block))
+        // This block is a request made through the user interface, send it back to the user.
+        let request = self
+            .inflight_user_requests
+            .remove(&UserRequest::Block(block_hash))
+            .expect("checked above that the request exists");
+
+        debug!("answering user request for block {block_hash}");
+        request
+            .2
+            .send(NodeResponse::Block(Some(block)))
+            .map_err(|_| WireError::ResponseSendError)?;
+
+        Ok(None)
+    }
+
+    /// Re-requests a user-requested block from another peer, reassigning the open user
+    /// request to it. This is the same non-blocking send used by `perform_user_request`; it
+    /// doesn't touch the `InflightRequests` used by block sync.
+    ///
+    /// If no peer is available, the request is dropped and the requester gets an error, just
+    /// like a `perform_user_request` that finds no peer to serve it.
+    fn retry_user_block_request(&mut self, block_hash: bitcoin::BlockHash) {
+        let user_req = UserRequest::Block(block_hash);
+
+        match self.send_to_fast_peer(NodeRequest::GetBlock(vec![block_hash]), ServiceFlags::NONE) {
+            Ok(new_peer) => {
+                if let Some(entry) = self.inflight_user_requests.get_mut(&user_req) {
+                    entry.0 = new_peer;
+                    entry.1 = Instant::now();
+                }
+            }
+            Err(err) => {
+                warn!("Can't retry user request for block {block_hash}: {err:?}");
+                self.inflight_user_requests.remove(&user_req);
+            }
+        }
     }
 }
