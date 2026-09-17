@@ -358,9 +358,6 @@ class FlorestaTestFramework:
         def check_peers_connection():
             nonlocal attempts
 
-            if attempts > 10:
-                time.sleep(1)
-
             attempts += 1
 
             return self.check_connection(peer_one, peer_two, is_connected)
@@ -372,7 +369,9 @@ class FlorestaTestFramework:
             site=timing.call_site(),
         ) as extra:
             try:
-                wait_until(predicate=check_peers_connection)
+                # Every attempt pings both peers over RPC, so back off a little
+                # more than the default interval.
+                wait_until(predicate=check_peers_connection, interval=0.2)
             finally:
                 extra["attempts"] = attempts
 
