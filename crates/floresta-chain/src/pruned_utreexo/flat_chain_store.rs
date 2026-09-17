@@ -864,35 +864,69 @@ impl FlatChainStore {
     ///
     /// [xxHash]: https://github.com/Cyan4973/xxHash
     fn check_integrity(&self) -> Result<(), FlatChainstoreError> {
-        let computed_checksum = self.compute_checksum();
-        let metadata = unsafe { self.get_metadata()? };
+        let stored_checksum = unsafe { self.get_metadata()? }.checksum;
 
-        if metadata.checksum != computed_checksum {
-            return Err(FlatChainstoreError::CorruptedDatabase);
+        if stored_checksum == self.compute_checksum()? {
+            return Ok(());
         }
 
-        Ok(())
+        // Stores written before we started hashing only the occupied part of each
+        // file carry a checksum over the whole map. Accept it once: the next flush
+        // rewrites the checksum in the current format. Going back to an older
+        // version after that reindexes once, the same way.
+        if stored_checksum == self.compute_whole_file_checksum() {
+            debug!("Chainstore checksum is in the old whole-file format, rewriting it");
+            return Ok(());
+        }
+
+        Err(FlatChainstoreError::CorruptedDatabase)
     }
 
     /// Computes the XXH3-64 checksum for our database
-    pub fn compute_checksum(&self) -> DbCheckSum {
-        // a function that computes the xxHash of a memory map
-        let checksum_fn = |mmap: &MmapMut| {
-            let mmap_as_slice = mmap.iter().as_slice();
-            let hash = XxHash3_64::oneshot(mmap_as_slice);
+    ///
+    /// The headers and fork headers files are written front to back, so only the
+    /// records we actually wrote are hashed. The rest of those maps is empty
+    /// space that a checksum over the whole file would have to fault in and hash
+    /// on every flush: 2 GiB of it on mainnet, most of it zeroes.
+    ///
+    /// The block index is hashed whole, because it is an open-addressing map and
+    /// its entries are spread over the entire capacity. It is a much smaller file.
+    pub fn compute_checksum(&self) -> Result<DbCheckSum, FlatChainstoreError> {
+        let metadata = unsafe { self.get_metadata()? };
+        let record_size = size_of::<HashedDiskHeader>();
 
-            FileChecksum(hash)
-        };
+        // `depth` is the height of our best block, so there are `depth + 1` headers
+        let headers_len = (metadata.depth as usize + 1) * record_size;
+        let fork_headers_len = metadata.fork_count as usize * record_size;
 
-        let headers_checksum = checksum_fn(&self.headers);
-        let index_checksum = checksum_fn(&self.block_index.index_map);
-        let fork_headers_checksum = checksum_fn(&self.fork_headers);
+        Ok(DbCheckSum {
+            headers_checksum: Self::checksum_prefix(&self.headers, headers_len),
+            index_checksum: Self::checksum_prefix(
+                &self.block_index.index_map,
+                self.block_index.index_map.len(),
+            ),
+            fork_headers_checksum: Self::checksum_prefix(&self.fork_headers, fork_headers_len),
+        })
+    }
+
+    /// The checksum as it was computed before we started hashing only the
+    /// occupied part of each file, kept to recognize stores written back then
+    fn compute_whole_file_checksum(&self) -> DbCheckSum {
+        let whole = |mmap: &MmapMut| Self::checksum_prefix(mmap, mmap.len());
 
         DbCheckSum {
-            headers_checksum,
-            index_checksum,
-            fork_headers_checksum,
+            headers_checksum: whole(&self.headers),
+            index_checksum: whole(&self.block_index.index_map),
+            fork_headers_checksum: whole(&self.fork_headers),
         }
+    }
+
+    /// The XXH3-64 of the first `len` bytes of a memory map
+    fn checksum_prefix(mmap: &MmapMut, len: usize) -> FileChecksum {
+        // Clamp, so bogus bookkeeping can't index past the map
+        let len = len.min(mmap.len());
+
+        FileChecksum(XxHash3_64::oneshot(&mmap[..len]))
     }
 
     /// Truncates a number to the nearest power of 2
@@ -1184,7 +1218,7 @@ impl FlatChainStore {
         self.block_index.flush()?;
         self.fork_headers.flush()?;
 
-        let checksum = self.compute_checksum();
+        let checksum = self.compute_checksum()?;
         let metadata = unsafe { self.get_metadata_mut() }?;
 
         metadata.checksum = checksum;
@@ -1581,6 +1615,40 @@ mod tests {
         };
 
         FlatChainStore::new(config)
+    }
+
+    #[test]
+    fn test_accepts_checksum_from_before_prefix_hashing() {
+        let mut store = get_test_chainstore(None).expect("Should create a chainstore");
+        store.flush().expect("Should flush");
+        store
+            .check_integrity()
+            .expect("A freshly flushed store is intact");
+
+        // Pretend this store was written by a version that hashed the whole map,
+        // which is what an upgrade finds on disk
+        let whole_file_checksum = store.compute_whole_file_checksum();
+        assert_ne!(
+            whole_file_checksum,
+            store.compute_checksum().expect("Should compute checksum"),
+            "The two formats should differ, otherwise this test proves nothing"
+        );
+
+        unsafe { store.get_metadata_mut().unwrap() }.checksum = whole_file_checksum;
+        store
+            .check_integrity()
+            .expect("A store from before prefix hashing should still be accepted");
+
+        // Anything else is still a corrupted database
+        unsafe { store.get_metadata_mut().unwrap() }.checksum = DbCheckSum {
+            headers_checksum: FileChecksum(1),
+            index_checksum: FileChecksum(2),
+            fork_headers_checksum: FileChecksum(3),
+        };
+        assert!(matches!(
+            store.check_integrity(),
+            Err(FlatChainstoreError::CorruptedDatabase)
+        ));
     }
 
     #[test]
