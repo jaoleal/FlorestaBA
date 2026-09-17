@@ -254,7 +254,7 @@ class BaseRPC(ABC):
                 if keep_waiting is not None and not keep_waiting():
                     extra["gave_up"] = True
                     return False
-                time.sleep(0.5)
+                time.sleep(self.POLL_INTERVAL)
 
             extra["timed_out"] = True
             return False
