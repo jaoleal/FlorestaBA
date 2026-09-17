@@ -50,6 +50,7 @@ use rcgen::CertificateParams;
 use rcgen::IsCa;
 use rcgen::KeyPair;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tokio::task;
 #[cfg(feature = "metrics")]
@@ -271,6 +272,10 @@ pub struct Florestad {
     /// are about to die
     stop_signal: Arc<RwLock<bool>>,
 
+    /// Fires as soon as `stop_signal` is set, so whoever is waiting for the
+    /// shutdown doesn't have to poll it
+    stop_signal_notify: Arc<Notify>,
+
     /// A channel that notifies we are done, and it's safe to die now
     stop_notify: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 
@@ -289,6 +294,25 @@ impl Florestad {
         info!("Stopping node...");
         let mut stop_signal = self.stop_signal.write().await;
         *stop_signal = true;
+        self.stop_signal_notify.notify_waiters();
+    }
+
+    /// Returns once someone asks us to stop, either through [`Florestad::stop`]
+    /// or the `stop` RPC.
+    ///
+    /// Callers that set the stop signal returned by [`Florestad::get_stop_signal`]
+    /// by hand won't wake this up, so don't rely on it as the only way out.
+    pub async fn wait_stop_signal(&self) {
+        loop {
+            // Register before reading the flag, otherwise a notification sent
+            // between the read and the await would be lost.
+            let notified = self.stop_signal_notify.notified();
+            if self.should_stop().await {
+                return;
+            }
+
+            notified.await;
+        }
     }
 
     pub async fn should_stop(&self) -> bool {
@@ -482,6 +506,7 @@ impl Florestad {
                 wallet.clone(),
                 chain_provider.get_handle(),
                 self.stop_signal.clone(),
+                self.stop_signal_notify.clone(),
                 self.config.network,
                 cfilters.clone(),
                 self.config
@@ -914,6 +939,7 @@ impl From<Config> for Florestad {
         Self {
             config,
             stop_signal: Arc::new(RwLock::new(false)),
+            stop_signal_notify: Arc::new(Notify::new()),
             stop_notify: Arc::new(Mutex::new(None)),
             #[cfg(feature = "json-rpc")]
             json_rpc: OnceLock::new(),
