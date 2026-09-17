@@ -96,6 +96,7 @@ use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
 use bitcoin::BlockHash;
+use bitcoin::Network;
 use bitcoin::hashes::Hash;
 use floresta_common::impl_error_from;
 use floresta_common::prelude::*;
@@ -198,6 +199,34 @@ impl FlatChainStoreConfig {
             cache_size: Some(10_000),
             path: path.as_ref().into(),
         }
+    }
+
+    /// Creates a new configuration with values sized for `network`
+    ///
+    /// The defaults reserve room for 10 million blocks, which is the right call for
+    /// mainnet and testnet but means mapping (and checksumming, on every flush and
+    /// integrity check) a 2 GiB headers file for networks that will never get close
+    /// to that. Signet and regtest get smaller files instead.
+    ///
+    /// The sizes only apply when the store is created: an existing store is opened
+    /// with the capacities recorded in its metadata, so changing this never
+    /// invalidates data already on disk. A store that does fill up returns
+    /// [`FlatChainstoreError::FullIndex`], it doesn't corrupt anything.
+    pub fn new_for_network(path: impl AsRef<Path>, network: Network) -> Self {
+        let mut config = Self::new(path);
+
+        // Room for ~1 million blocks (128 MiB of headers) and ~131k blocks
+        // (16 MiB) respectively, against ~250k blocks on signet today and the
+        // handful a regtest chain usually has.
+        let capacity = match network {
+            Network::Signet => 1_000_000,
+            Network::Regtest => 100_000,
+            _ => return config,
+        };
+
+        config.headers_file_size = Some(capacity);
+        config.block_index_size = Some(capacity);
+        config
     }
 }
 
