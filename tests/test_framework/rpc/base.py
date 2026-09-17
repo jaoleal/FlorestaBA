@@ -303,13 +303,16 @@ class BaseRPC(ABC):
 
     def stop(self):
         """
-        Perform the `stop` RPC command to the daemon and wait for the connection to close
+        Perform the `stop` RPC command to the daemon.
+
+        Returns as soon as the daemon accepts the request. Callers that need the
+        daemon to be gone should wait on its process, which is what Bitcoin Core
+        does in `TestNode.is_node_stopped` (it polls `self.process.poll()`, never
+        the RPC socket):
+        https://github.com/bitcoin/bitcoin/blob/master/test/functional/test_framework/test_node.py
         """
         with timing.span("rpc.stop_call", rpc=self.__class__.__name__):
-            result = self.perform_request("stop")
-        with timing.span("rpc.stop_wait_shutdown", rpc=self.__class__.__name__):
-            self.wait_on_socket(opened=False)
-        return result
+            return self.perform_request("stop")
 
     def addnode(self, node: str, command: str, v2transport: bool = False):
         """

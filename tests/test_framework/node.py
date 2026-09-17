@@ -342,9 +342,13 @@ class Node:
                     extra["method"] = "terminate"
                     self.daemon.process.terminate()
 
+                # Wait on the process itself instead of polling the RPC socket:
+                # it wakes up the moment the daemon is gone.
                 with timing.span("node.process_exit", variant=self.variant.value):
-                    self.daemon.process.wait()
-                self.rpc.wait_on_socket(opened=False)
+                    self.daemon.process.wait(timeout=self.rpc.TIMEOUT)
+                # The port is released with the process, so one check is enough.
+                if self.rpc.is_socket_listening():
+                    self.rpc.wait_on_socket(opened=False)
 
                 usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
                 extra["lifetime_cpu_user"] = round(
