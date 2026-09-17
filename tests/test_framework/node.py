@@ -307,9 +307,12 @@ class Node:
             self.daemon.start()
             self.rpc.wait_on_socket(opened=True)
 
-            # Test if the node is already responding to RPC calls.
+            # Wait until the node actually answers RPC calls: the port is open
+            # before the daemon is ready to serve.
             with timing.span("node.first_rpc", variant=self.variant.value):
-                self.rpc.get_blockchain_info()
+                self.rpc.wait_until_responsive(
+                    keep_waiting=lambda: self.daemon.is_running
+                )
             # When starting Floresta for the first time, it is ideal to check
             # if the Electrum server is ready to receive requests.
             if self.variant == NodeType.FLORESTAD and self.static_values is not True:

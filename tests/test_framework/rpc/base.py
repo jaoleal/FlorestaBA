@@ -41,6 +41,7 @@ class BaseRPC(ABC):
     """
 
     TIMEOUT: int = 30  # seconds
+    POLL_INTERVAL: float = 0.05  # seconds
 
     def __init__(self, config: ConfigRPC, log):
         self._config = config
@@ -259,6 +260,31 @@ class BaseRPC(ABC):
         if not success:
             state = "open" if opened else "closed"
             raise TimeoutError(f"{self.address} not {state} after {timeout} seconds")
+
+    def wait_until_responsive(self, keep_waiting=None):
+        """
+        Wait until the daemon answers RPC calls.
+
+        A listening RPC port does not mean the daemon is ready: Bitcoin Core
+        accepts the connection and answers 503 while it warms up. Retry until it
+        answers, the process dies, or we run out of time.
+        """
+        deadline = time.time() + self.TIMEOUT
+        last_error = None
+
+        while time.time() < deadline:
+            try:
+                return self.get_blockchain_info()
+            # pylint: disable=broad-exception-caught
+            except Exception as e:
+                last_error = e
+
+            if keep_waiting is not None and not keep_waiting():
+                break
+
+            time.sleep(self.POLL_INTERVAL)
+
+        raise TimeoutError(f"{self.address} did not answer RPC calls: {last_error!r}")
 
     def get_blockchain_info(self) -> dict:
         """
