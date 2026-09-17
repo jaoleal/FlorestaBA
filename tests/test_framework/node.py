@@ -305,7 +305,12 @@ class Node:
             existing_chain_state=existing_chain_state,
         ):
             self.daemon.start()
-            self.rpc.wait_on_socket(opened=True)
+            # The daemon is not given a fixed amount of time to boot: we wait for
+            # its RPC port and bail out as soon as the process dies.
+            self.rpc.wait_on_socket(
+                opened=True, keep_waiting=lambda: self.daemon.is_running
+            )
+            self.daemon.raise_if_died()
 
             # Wait until the node actually answers RPC calls: the port is open
             # before the daemon is ready to serve.

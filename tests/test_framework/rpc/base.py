@@ -226,10 +226,16 @@ class BaseRPC(ABC):
             connected = sock.connect_ex((self._config.host, self._config.port))
             return connected == 0
 
-    def try_wait_on_socket(self, opened: bool, timeout: float) -> bool:
+    def try_wait_on_socket(
+        self, opened: bool, timeout: float, keep_waiting=None
+    ) -> bool:
         """
         Verifies that the RPC socket connection matches the expected one, retrying for
         the specified duration. Returns true if the connection matches, false otherwise.
+
+        `keep_waiting` is an optional predicate checked on every poll; when it
+        returns False we give up early, so a daemon that died on startup is not
+        waited on until the timeout.
         """
         state = "open" if opened else "closed"
         with timing.span(
@@ -245,18 +251,21 @@ class BaseRPC(ABC):
                         self.log_msg(f"{self._config.host}:{self._config.port} {state}")
                     )
                     return True
+                if keep_waiting is not None and not keep_waiting():
+                    extra["gave_up"] = True
+                    return False
                 time.sleep(0.5)
 
             extra["timed_out"] = True
             return False
 
-    def wait_on_socket(self, opened: bool):
+    def wait_on_socket(self, opened: bool, keep_waiting=None):
         """
         Ensure the RPC connection reaches the desired state within a timeout.
         Raises TimeoutError if the state is not reached.
         """
         timeout = self.TIMEOUT
-        success = self.try_wait_on_socket(opened, timeout)
+        success = self.try_wait_on_socket(opened, timeout, keep_waiting)
         if not success:
             state = "open" if opened else "closed"
             raise TimeoutError(f"{self.address} not {state} after {timeout} seconds")
