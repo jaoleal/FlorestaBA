@@ -7,7 +7,6 @@ Integrate test for the CLI utility that interacts with a Floresta node
 using the `getrawtransaction` RPC method.
 """
 
-import time
 import os
 import pytest
 from test_framework.node import NodeType
@@ -120,10 +119,14 @@ class TestGetRawTransaction:
         self.bitcoind.rpc.generate_block_to_address(COINBASE_BLOCKS, ADDRESS_COINBASE)
 
         self.node_manager.connect_nodes(self.bitcoind, utreexod_node)
-        time.sleep(5)
+        self.node_manager.wait_for_nodes_synced(
+            [self.bitcoind, utreexod_node], is_finished_ibd=False
+        )
 
         self.node_manager.connect_nodes(self.florestad, utreexod_node)
-        time.sleep(5)
+        self.node_manager.wait_for_nodes_synced(
+            [self.florestad, utreexod_node], is_finished_ibd=False
+        )
 
         self.node_manager.connect_nodes(self.florestad, self.bitcoind)
 

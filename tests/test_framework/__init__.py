@@ -427,8 +427,16 @@ class FlorestaTestFramework:
         if not self._nodes:
             raise AssertionError("No nodes to check for synchronization")
 
-        expected_block = self._nodes[0].rpc.get_block_count()
-        for node in self._nodes:
+        return self.check_nodes_synced(self._nodes, is_finished_ibd=is_finished_ibd)
+
+    def check_nodes_synced(
+        self, nodes: List[Node], is_finished_ibd: bool = True
+    ) -> bool:
+        """
+        Check whether the given nodes agree on the best block.
+        """
+        expected_block = nodes[0].rpc.get_block_count()
+        for node in nodes:
             block_count = node.rpc.get_block_count()
 
             if (
@@ -451,6 +459,22 @@ class FlorestaTestFramework:
         return True
 
     @timing.timed("framework.wait_for_sync_nodes")
+    @timing.timed("framework.wait_for_nodes_synced")
+    def wait_for_nodes_synced(self, nodes: List[Node], is_finished_ibd: bool = True):
+        """
+        Wait until the given nodes agree on the best block.
+
+        Use this instead of sleeping after connecting a pair of nodes: it waits
+        for what actually matters, and returns as soon as it happens.
+        """
+        wait_until(
+            lambda: self.check_nodes_synced(nodes, is_finished_ibd=is_finished_ibd)
+        )
+
+        self.log.debug(
+            f"Nodes {[node.variant.value for node in nodes]} agree on the best block"
+        )
+
     def wait_for_sync_nodes(self, is_finished_ibd: bool = True):
         """
         Wait for all nodes to be synced.
