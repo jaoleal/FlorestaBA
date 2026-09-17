@@ -46,6 +46,20 @@ from test_framework.messages import (
 )
 
 
+def try_and_log_stop(action, log, node):
+    """
+    Run a node shutdown step, logging failures instead of raising.
+
+    One node failing to stop should not leave the remaining ones running.
+    """
+    try:
+        return action()
+    # pylint: disable=broad-exception-caught
+    except Exception as e:
+        log.error(f"Failed to stop node '{node.variant}': {e}")
+        return None
+
+
 # pylint: disable=too-many-public-methods
 class FlorestaTestFramework:
     """
@@ -282,9 +296,15 @@ class FlorestaTestFramework:
     def stop(self):
         """
         Stop all nodes.
+
+        Every node is asked to stop before we wait for any of them, so their
+        shutdowns overlap instead of adding up.
         """
-        for i in range(len(self._nodes)):
-            self.stop_node(i)
+        for node in self._nodes:
+            try_and_log_stop(node.request_stop, self.log, node)
+
+        for node in self._nodes:
+            try_and_log_stop(node.wait_stopped, self.log, node)
 
         if (
             hasattr(self, "_network_thread")
