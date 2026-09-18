@@ -122,6 +122,8 @@ class Node:
         self._tls = tls
         self._variant = variant
         self._static_values = True
+        self._stop_method = "rpc"
+        self._usage_before_stop = None
         self._log = log
         self._log_path = p2p_config.log_path
 
@@ -305,7 +307,12 @@ class Node:
             existing_chain_state=existing_chain_state,
         ):
             self.daemon.start()
-            self.rpc.wait_on_socket(opened=True)
+            # The daemon is not given a fixed amount of time to boot: we wait for
+            # its RPC port and bail out as soon as the process dies.
+            self.rpc.wait_on_socket(
+                opened=True, keep_waiting=lambda: self.daemon.is_running
+            )
+            self.daemon.raise_if_died()
 
             # Wait until the node actually answers RPC calls: the port is open
             # before the daemon is ready to serve.
@@ -319,37 +326,62 @@ class Node:
                 with timing.span("node.electrum_ping", variant=self.variant.value):
                     self.electrum.ping()
 
-    def stop(self):
+    def request_stop(self):
         """
-        Stop the node.
-        """
-        response = None
-        if self.daemon.is_running:
-            with timing.span("node.stop", variant=self.variant.value) as extra:
-                # The daemon is reaped by `process.wait()` below, so the change in
-                # children usage is the CPU time it consumed over its whole lifetime.
-                usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
-                extra["method"] = "rpc"
-                try:
-                    response = self.rpc.stop()
-                # pylint: disable=broad-exception-caught
-                except Exception:
-                    extra["method"] = "terminate"
-                    self.daemon.process.terminate()
+        Ask the daemon to stop, without waiting for it to be gone.
 
-                with timing.span("node.process_exit", variant=self.variant.value):
-                    self.daemon.process.wait()
+        Use together with `wait_stopped`, so several nodes can shut down at the
+        same time instead of one after the other.
+        """
+        if not self.daemon.is_running:
+            return None
+
+        # The daemon is reaped by `wait_stopped`, so the change in children usage
+        # between the two is the CPU time it consumed over its whole lifetime.
+        self._usage_before_stop = resource.getrusage(resource.RUSAGE_CHILDREN)
+        self._stop_method = "rpc"
+        try:
+            return self.rpc.stop()
+        # pylint: disable=broad-exception-caught
+        except Exception:
+            self._stop_method = "terminate"
+            self.daemon.process.terminate()
+            return None
+
+    def wait_stopped(self):
+        """
+        Wait for a daemon asked to stop by `request_stop` to be gone.
+        """
+        if self.daemon.process is None or self._usage_before_stop is None:
+            return
+
+        with timing.span("node.stop", variant=self.variant.value) as extra:
+            extra["method"] = self._stop_method
+            # Wait on the process itself instead of polling the RPC socket:
+            # it wakes up the moment the daemon is gone.
+            with timing.span("node.process_exit", variant=self.variant.value):
+                self.daemon.process.wait(timeout=self.rpc.TIMEOUT)
+            # The port is released with the process, so one check is enough.
+            if self.rpc.is_socket_listening():
                 self.rpc.wait_on_socket(opened=False)
 
-                usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-                extra["lifetime_cpu_user"] = round(
-                    usage_after.ru_utime - usage_before.ru_utime, 3
-                )
-                extra["lifetime_cpu_sys"] = round(
-                    usage_after.ru_stime - usage_before.ru_stime, 3
-                )
-                extra["returncode"] = self.daemon.process.returncode
+            usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            extra["lifetime_cpu_user"] = round(
+                usage_after.ru_utime - self._usage_before_stop.ru_utime, 3
+            )
+            extra["lifetime_cpu_sys"] = round(
+                usage_after.ru_stime - self._usage_before_stop.ru_stime, 3
+            )
+            extra["returncode"] = self.daemon.process.returncode
 
+        self._usage_before_stop = None
+
+    def stop(self):
+        """
+        Stop the node and wait for it to be gone.
+        """
+        response = self.request_stop()
+        self.wait_stopped()
         return response
 
     def connect_node(

@@ -226,10 +226,16 @@ class BaseRPC(ABC):
             connected = sock.connect_ex((self._config.host, self._config.port))
             return connected == 0
 
-    def try_wait_on_socket(self, opened: bool, timeout: float) -> bool:
+    def try_wait_on_socket(
+        self, opened: bool, timeout: float, keep_waiting=None
+    ) -> bool:
         """
         Verifies that the RPC socket connection matches the expected one, retrying for
         the specified duration. Returns true if the connection matches, false otherwise.
+
+        `keep_waiting` is an optional predicate checked on every poll; when it
+        returns False we give up early, so a daemon that died on startup is not
+        waited on until the timeout.
         """
         state = "open" if opened else "closed"
         with timing.span(
@@ -245,18 +251,21 @@ class BaseRPC(ABC):
                         self.log_msg(f"{self._config.host}:{self._config.port} {state}")
                     )
                     return True
-                time.sleep(0.5)
+                if keep_waiting is not None and not keep_waiting():
+                    extra["gave_up"] = True
+                    return False
+                time.sleep(self.POLL_INTERVAL)
 
             extra["timed_out"] = True
             return False
 
-    def wait_on_socket(self, opened: bool):
+    def wait_on_socket(self, opened: bool, keep_waiting=None):
         """
         Ensure the RPC connection reaches the desired state within a timeout.
         Raises TimeoutError if the state is not reached.
         """
         timeout = self.TIMEOUT
-        success = self.try_wait_on_socket(opened, timeout)
+        success = self.try_wait_on_socket(opened, timeout, keep_waiting)
         if not success:
             state = "open" if opened else "closed"
             raise TimeoutError(f"{self.address} not {state} after {timeout} seconds")
@@ -294,13 +303,16 @@ class BaseRPC(ABC):
 
     def stop(self):
         """
-        Perform the `stop` RPC command to the daemon and wait for the connection to close
+        Perform the `stop` RPC command to the daemon.
+
+        Returns as soon as the daemon accepts the request. Callers that need the
+        daemon to be gone should wait on its process, which is what Bitcoin Core
+        does in `TestNode.is_node_stopped` (it polls `self.process.poll()`, never
+        the RPC socket):
+        https://github.com/bitcoin/bitcoin/blob/master/test/functional/test_framework/test_node.py
         """
         with timing.span("rpc.stop_call", rpc=self.__class__.__name__):
-            result = self.perform_request("stop")
-        with timing.span("rpc.stop_wait_shutdown", rpc=self.__class__.__name__):
-            self.wait_on_socket(opened=False)
-        return result
+            return self.perform_request("stop")
 
     def addnode(self, node: str, command: str, v2transport: bool = False):
         """
