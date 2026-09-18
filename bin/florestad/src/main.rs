@@ -26,7 +26,6 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::exit;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::Network;
@@ -34,7 +33,6 @@ use clap::Parser;
 use cli::Cli;
 use floresta_node::Config;
 use floresta_node::Florestad;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing::Level;
@@ -128,17 +126,6 @@ fn main() {
         .build()
         .unwrap();
 
-    let signal = Arc::new(RwLock::new(false));
-    let _signal = signal.clone();
-
-    _rt.spawn(async move {
-        // This is used to signal the runtime to stop gracefully.
-        // It will be set to true when we receive a Ctrl-C or a stop signal.
-        tokio::signal::ctrl_c().await.unwrap();
-        let mut sig = signal.write().await;
-        *sig = true;
-    });
-
     let florestad = Florestad::from(config);
     _rt.block_on(async {
         florestad.start().await.unwrap_or_else(|e| {
@@ -146,17 +133,24 @@ fn main() {
             exit(1);
         });
 
-        // wait for shutdown
+        // Wait for shutdown. `wait_stop_signal` covers the `stop` RPC and
+        // `Florestad::stop`; the timer is only a fallback for callers that flip
+        // the stop signal returned by `get_stop_signal` themselves.
         loop {
-            if florestad.should_stop().await || *_signal.read().await {
-                info!("Stopping Floresta");
-                florestad.stop().await;
-                let _ = timeout(Duration::from_secs(10), florestad.wait_shutdown()).await;
-                break;
+            tokio::select! {
+                () = florestad.wait_stop_signal() => break,
+                _ = tokio::signal::ctrl_c() => break,
+                () = sleep(Duration::from_secs(5)) => {
+                    if florestad.should_stop().await {
+                        break;
+                    }
+                }
             }
-
-            sleep(Duration::from_secs(5)).await;
         }
+
+        info!("Stopping Floresta");
+        florestad.stop().await;
+        let _ = timeout(Duration::from_secs(10), florestad.wait_shutdown()).await;
     });
 
     // Drop `florestad` and the runtime.

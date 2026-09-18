@@ -47,6 +47,7 @@ use floresta_wire::node_interface::ChainMethods;
 use floresta_wire::node_interface::MempoolMethods;
 use serde_json::Value;
 use serde_json::json;
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::debug;
@@ -89,6 +90,7 @@ pub struct RpcImpl<Blockchain: RpcChain> {
     pub(super) wallet: Arc<AddressCache<KvDatabase>>,
     pub(super) node: NodeHandle,
     pub(super) kill_signal: Arc<RwLock<bool>>,
+    pub(super) kill_signal_notify: Arc<Notify>,
     pub(super) inflight: Arc<RwLock<HashMap<Value, InflightRpc>>>,
     pub(super) log_path: PathBuf,
     pub(super) start_time: Instant,
@@ -664,6 +666,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
         wallet: Arc<AddressCache<KvDatabase>>,
         node: NodeHandle,
         kill_signal: Arc<RwLock<bool>>,
+        kill_signal_notify: Arc<Notify>,
         network: Network,
         block_filter_storage: Option<Arc<NetworkFilters<FlatFiltersStore>>>,
         address: Option<SocketAddr>,
@@ -706,6 +709,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
                 wallet,
                 node,
                 kill_signal,
+                kill_signal_notify,
                 network,
                 block_filter_storage,
                 inflight: Arc::new(RwLock::new(HashMap::new())),

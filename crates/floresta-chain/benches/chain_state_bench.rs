@@ -334,7 +334,7 @@ fn chainstore_checksum_benchmark(c: &mut Criterion) {
     c.bench_function("flat_chainstore_checksum", |b| {
         b.iter_batched(
             setup_chain,
-            |chainstore| chainstore.compute_checksum(),
+            |chainstore| chainstore.compute_checksum().unwrap(),
             BatchSize::SmallInput,
         )
     });

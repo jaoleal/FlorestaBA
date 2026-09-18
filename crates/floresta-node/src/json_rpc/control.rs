@@ -127,6 +127,7 @@ impl<Blockchain: RpcChain> RpcImpl<Blockchain> {
     // stop
     pub(super) async fn stop(&self) -> Result<&str, JsonRpcError> {
         *self.kill_signal.write().await = true;
+        self.kill_signal_notify.notify_waiters();
 
         Ok("Floresta stopping")
     }
