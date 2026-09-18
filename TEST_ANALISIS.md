@@ -1,32 +1,40 @@
 # Functional tests bottleneck analysis
 
-Date: 2026-09-17 · commit `6bfbfb70` · macOS, 14 cores.
+Date: 2026-09-17 · commit `6bfbfb70` (local) / `2c540cc` (CI) · macOS 14 cores
+and GitHub Actions `ubuntu-latest` (4 vCPU).
 
 Line numbers for `tests/` refer to the tree **with** the timing instrumentation
 applied (see [Instrumentation](#instrumentation)).
 
 ## TL;DR
 
-**The bottleneck is the `florestad` binary, not the Python test framework.**
-Starting a `florestad` takes ~8s and stopping it takes ~9s, and both are CPU
-bound: a single florestad burns ~16s of CPU over an 18s lifetime, and 20.4s on
-average during a real suite run.
+**The bottleneck is not the same on macOS and on CI**, and CI is what matters
+for the project. Measured on both:
 
-Almost all of it is one operation — `flush()`/`check_integrity()` computing an
-XXH3 checksum over the **whole 2 GiB `headers.bin` mmap**, plus the 64 MiB
-block index. That runs:
+| | macOS (14 cores, `-n 4`) | CI (ubuntu-latest, 4 vCPU, `-n 4`) |
+|---|---:|---:|
+| wall time | 322s | **135s** |
+| florestad start | 9.17s | **1.04s** |
+| florestad stop | 9.47s | **3.35s** |
+| florestad CPU per lifetime | 20.38s | **0.88s** |
 
-1. when the chain store is **created** (every test starts from a clean datadir);
-2. when an existing chain store with a **saved height** is **opened** (restart tests);
-3. on **shutdown**, from `UtreexoNode::shutdown`;
-4. on **every block connected once the node is out of IBD** — which in regtest
-   is every block the tests mine.
+1. **On macOS**, the dominant cost is the XXH3 checksum over the 2 GiB
+   `headers.bin` mmap (Finding 1a). Hashing a sparse mmap costs ~8s per call on
+   APFS and is essentially free on the CI filesystem (0.88s of CPU for a whole
+   florestad lifetime, against 20.4s here). **This is a local-only problem** —
+   real, worth fixing, but it does not slow CI down.
+2. **On CI**, what is left is the `florestad` shutdown loop polling its stop
+   signal every **5s** (Finding 1b): mean 3.35s, p50 3.5s, p95 5.0s per stop,
+   **35% of all worker time**.
+3. **On CI**, the framework's own fixed costs are now proportionally the
+   largest: ~110s per run of unconditional `time.sleep(1)` after each spawn
+   (Finding 2), plus the 0.5s polling intervals.
+4. **On CI only**, some daemon starts fail and get retried, including bitcoind
+   starts that burn the full 30s RPC timeout (Finding 5): ~41s per run.
 
-On top of that, the `florestad` main loop only polls its stop signal every
-**5s**, adding up to 5s to each shutdown.
-
-In the reference run, **68% of the summed test time was setup + teardown**
-(439s of 643s), nearly all of it starting and stopping florestad.
+In the macOS reference run, **68% of the summed test time was setup + teardown**
+(439s of 643s). On CI setup + teardown is 55% (261s of 470s) — smaller, but
+still the biggest single bucket.
 
 ## Methodology
 
@@ -38,6 +46,8 @@ In the reference run, **68% of the summed test time was setup + teardown**
    until the RPC port opens, and from the `stop` RPC until the process exits.
 4. Full instrumented runs, once the instrumentation described below was in
    place. Every number attributed to "the instrumented run" comes from there.
+5. Three instrumented CI runs on one `ubuntu-latest` runner
+   (`functional-timings.yml`, artifact `functional-timings-35259332933`).
 
 ## Reference run
 
@@ -113,7 +123,7 @@ The `florestad0.log` timeline from `test_get_memory_info` shows where it goes:
 14:03:31 INFO florestad: Stopping Floresta                         <- 8s
 ```
 
-### 1a. The 2 GiB checksum
+### 1a. The 2 GiB checksum (macOS-dominant)
 
 `crates/floresta-chain/src/pruned_utreexo/flat_chain_store.rs`
 
@@ -128,8 +138,10 @@ The `florestad0.log` timeline from `test_get_memory_info` shows where it goes:
   - `blocks_index.bin`: 64 MiB
   - `fork_headers.bin`: 2 MiB
 
-Hashing 2 GiB of a sparse mmap faults in every zero page. That is the ~8s, and
-it runs on four different occasions:
+Hashing 2 GiB of a sparse mmap faults in every zero page. On macOS/APFS that
+is ~8s per call; on the CI runner the same code costs almost nothing (a whole
+florestad lifetime uses 0.88s of CPU there, against 20.38s here), so this
+finding is **local-only in practice**. It still runs on four occasions:
 
 1. **Startup with a new datadir**, which is nearly every test, since `run.sh`
    and the framework create a clean datadir per test.
@@ -163,12 +175,17 @@ Evidence, from the instrumented run and the standalone probe:
 Cases 1–3 are confirmed by measurement; case 4 is read from the code and
 matches the RPC stalls, but has not been confirmed with a profiler.
 
+**Scope:** every number above is from macOS. On CI, florestad start is 1.04s
+(`wait RPC socket open` p50 of 0.2ms) and no RPC stalls of this shape appear,
+so the hashing cost does not materialize there. Worth fixing for local
+developer experience and for slower filesystems, not as a CI win.
+
 `FlatChainStoreConfig` already accepts `headers_file_size`, `block_index_size`
 and `fork_file_size` (l. 141–180), but `Florestad::load_chain_state`
 (`crates/floresta-node/src/florestad.rs:724-736`) only uses
 `FlatChainStoreConfig::new(path)`, with the defaults.
 
-### 1b. Shutdown loop polling every 5s
+### 1b. Shutdown loop polling every 5s (CI-dominant)
 
 `bin/florestad/src/main.rs:146-160`:
 ```rust
@@ -184,6 +201,12 @@ loop {
 ```
 After the `stop` RPC the process takes up to 5s just to notice the signal, and
 only then waits on `wait_shutdown` (10s timeout).
+
+On CI this is **the** florestad cost, and the distribution matches a uniform
+0–5s wait exactly: mean 3.35s, p50 3.51s, p95 5.01s, max 5.05s over 147 stops.
+At 49 florestad stops per run that is **164s of worker time per run, 35% of all
+test time**, for a signal the process already has. On macOS the same stop takes
+9.47s because the checksum runs on top of this wait.
 
 ### Estimated impact
 
@@ -207,13 +230,115 @@ restarts florestad several times, the cost multiplies (57s + 46s of call time).
 
 Items 1+4, or 2+4, should take setup and teardown from ~9s to under 1s per test.
 
+## CI results (3 runs, ubuntu-latest, 4 vCPU, `-n 4`)
+
+`64 passed, 2 skipped` in all three runs — the `getblockchaininfo` float
+failure does not reproduce there. Wall time: mean **134.9s**, stdev 10.5s
+(124.2 / 135.4 / 145.1). For reference, the same suite on this Mac at `-n 4`
+takes ~322s, so **CI is ~2.4× faster than the Mac**.
+
+| bucket | worker time/run | % of test time |
+|---|---:|---:|
+| test setup | 118.2s | 25% |
+| test call | 208.9s | 44% |
+| test teardown | 143.4s | 30% |
+| **all test phases** | **470.5s** | 100% |
+| node stop: florestad | 164.3s | 35% |
+| node start: bitcoind | 70.5s | 15% |
+| node start: florestad | 65.5s | 14% |
+| node start: utreexod | 16.1s | 3% |
+| `time.sleep` inside `test_framework` | 401.5s | 85% |
+| `time.sleep` in tests/fixtures | 45.7s | 10% |
+
+florestad per stage (150 starts, 147 stops over 3 runs):
+
+| stage | mean | p50 | p95 | total/run |
+|---|---:|---:|---:|---:|
+| start (new chain state) | 1.04s | 1.00s | 1.07s | 44.2s |
+| ↳ fixed sleep after spawn | 1.00s | 1.00s | 1.00s | 63.7s |
+| ↳ wait RPC socket open | 27.0ms | 0.2ms | 0.6ms | 1.4s |
+| stop | 3.35s | 3.51s | 5.01s | 164.3s |
+| ↳ wait shutdown | 3.35s | 3.50s | 5.00s | 164.1s |
+| daemon lifetime CPU | 880ms | 674ms | 1.19s | 43.1s |
+
+Reading of these numbers:
+
+- **The florestad binary is fast on CI, except for shutdown.** Startup is
+  1.04s, of which 1.00s is the framework's own fixed sleep — the binary itself
+  is ready in ~0.2ms of socket wait. The checksum cost that dominates macOS
+  simply does not show up.
+- **Shutdown is pure waiting on the 5s poll loop** (Finding 1b), and it is the
+  single largest bucket at 35% of worker time.
+- **The framework's fixed sleep is now the second largest**: 63.7s/run for
+  florestad plus 30.3s/run for bitcoind plus utreexod, ~110s/run of `sleep(1)`
+  that buys nothing.
+- **Polling at 0.5s is visible**: the top sleep site is `rpc/base.py:247`
+  (socket polling) at 132.4s/run from teardown alone.
+- `wait_for_peers_connections` is worse on CI: mean 2.2 attempts (max 20), and
+  **13 calls per 3 runs went past 10 attempts**, where each extra attempt adds
+  a 1s sleep — 61.8s/run total.
+
+## Local `-n` sweep (macOS, 3 rounds each)
+
+`-n` 2/4/8/12/14, three full runs each, interleaved so noise spreads evenly.
+
+| `-n` | wall (mean) | stdev | speedup vs `-n 2` | florestad start | florestad stop | florestad CPU | total phase time |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 603.3s | 2.3s | 1.00× | 8.78s | 9.24s | 19.79s | 1151.8s |
+| 4 | 326.1s | 6.1s | 1.85× | 9.15s | 9.38s | 19.96s | 1166.9s |
+| 8 | 215.5s | 17.7s | 2.80× | 9.30s | 9.55s | 20.65s | 1200.1s |
+| 12 | **179.2s** | 3.1s | **3.37×** | 10.34s | 10.35s | 22.28s | 1296.8s |
+| 14 | 198.9s | 0.9s | 3.03× | 11.08s | 10.91s | 23.04s | 1360.8s |
+
+- **Scaling is near-linear only from `-n 2` to `-n 4`** (1.85× for 2× the
+  workers). After that it flattens: 8→12 buys just 1.2×.
+- **The optimum is `-n 12`, and `-n 14` is worse** (+20s). This is a 14-core
+  machine, so with 14 workers the daemons compete with the workers themselves.
+- **The per-node cost degrades as `-n` grows**: florestad start goes from 8.78s
+  to 11.08s (+26%) and its CPU from 19.79s to 23.04s (+16%), while total worker
+  time grows 18%. That is the signature of CPU contention, and it confirms the
+  macOS checksum cost is CPU bound rather than I/O wait.
+- At `-n 12`, 49 florestads × ~22s of CPU ≈ 1090s of CPU over a 179s wall
+  clock — about 6 cores busy on nothing but the checksum.
+- `-n 8` has by far the widest spread (stdev 17.7s), so it sits right at the
+  point where contention starts to bite.
+
+**Conclusion:** bumping `-n` locally is worth it (`-n 4` → `-n 12` cuts the
+suite almost in half), but it is a workaround. On the 4-vCPU CI runner there is
+no room to do this, which is why the fixes in the priority table matter more.
+
+## Finding 5: daemon starts that fail and get retried (CI only)
+
+`run_node` retries a failed start up to 3 times, and the instrumentation tags
+the attempts that raised. On CI, beyond the 13.7/run expected failures from
+`wallet.py` (which are intentional, under `pytest.raises`), there are starts
+that fail for no test reason:
+
+- **bitcoind, 4 occurrences over 3 runs, 31.02s each** (~41s/run): the RPC
+  socket wait runs to the full `BaseRPC.TIMEOUT` of 30s
+  (`tests/test_framework/rpc/base.py:43`) and only then retries, successfully.
+  Seen in `getconnectioncount.py`, `ping.py` and `gettxout.py`.
+- **florestad, 5 occurrences over 3 runs, ~1s each**: the process is already
+  dead when the fixed sleep ends, so the retry is quick. Seen in
+  `blockchain_block_header.py`, `uptime.py`, `getrpcinfo.py`, `getblock.py`
+  and `disconnectnode.py`.
+
+None of these failed the suite, so they are invisible today — the tests just
+get slower and noisier. `getconnectioncount.py` is the slowest CI test at
+35.1s with a **20.2s stdev**, entirely from this.
+
+Likely cause: the framework assigns random ports and the daemon loses the race
+against another worker (`Node.update_configs` re-rolls them on retry, which is
+why the retry works). Worth confirming by logging the chosen ports and the
+daemon stderr on a failed attempt.
+
 ## Finding 2: fixed cost in the Python framework
 
 Smaller than Finding 1, but it applies to every test.
 
 | Location | What it does | Cost |
 |---|---|---|
-| `tests/test_framework/daemon/base.py:180` | unconditional `time.sleep(1)` after `Popen` | 1s per node started (54 nodes in the run ≈ 54 worker-seconds) |
+| `tests/test_framework/daemon/base.py:180` | unconditional `time.sleep(1)` after `Popen` | 1s per node started: ~54s/run on macOS, **~110s/run on CI** (the single largest framework cost there) |
 | `tests/test_framework/rpc/base.py:228-250` (`try_wait_on_socket`) | polls the RPC port every 0.5s, on both startup and shutdown | up to 0.5s × 2 per node |
 | `tests/test_framework/node.py:319-352` (`Node.stop`) | `stop` RPC → `process.wait()` → wait for the socket to close | serial |
 | `tests/test_framework/__init__.py:282-291` (`FlorestaTestFramework.stop`) | stops nodes **one at a time** | with 3 nodes, sums 3 shutdowns (~9s for florestad alone) |
@@ -250,9 +375,9 @@ Smaller than Finding 1, but it applies to every test.
 - `-n 4` is hardcoded on a 14-core machine. `user 9m12s` against `real 3m46s`
   means ~2.4 cores busy on average — and that `user` time is mostly the
   florestad checksum (28 florestads × ~16s of CPU ≈ 450s), not idle waiting.
-  So raising `-n` only helps while there are free cores: likely on this Mac,
-  but on a 4-vCPU CI runner `-n 4` should already saturate. Being measured; see
-  [Open items](#open-items).
+  So raising `-n` only helps while there are free cores. On the 4-vCPU CI
+  runner `-n 4` is already at the hardware limit. Locally the sweep (below)
+  shows it keeps paying up to `-n 12`.
 - `--dist=loadscope`: one slow module (e.g. `wallet.py`, >2min across its two
   tests) occupies a whole worker.
 - `-x`: one failure aborts the suite and hides the rest of the timings (which
@@ -262,14 +387,109 @@ Smaller than Finding 1, but it applies to every test.
 
 ## Suggested priority
 
-| # | Change | Expected gain | Effort |
+Ordered by what it buys **on CI**, which is where the suite actually costs
+time for the project.
+
+| # | Change | Expected gain on CI | Effort |
 |---|---|---|---|
-| 1 | florestad: shutdown loop without `sleep(5s)` | ~2.5–5s per stop | low |
-| 2 | florestad: checksum/flush that does not walk the 2 GiB (or a smaller file in regtest) | ~8s per new-chain start, per start with a saved height, per stop, and **per block connected after IBD** | medium |
-| 3 | framework: stop nodes in parallel | ~9s per extra florestad in teardown | low |
-| 4 | framework: drop the `sleep(1)` on start and lower the polling intervals | ~1–2s per node | low |
-| 5 | tests: drop the fixed sleeps (`conftest`, `getrawtransaction`) | 4–10s per affected test | low |
-| 6 | pytest: higher `-n` | bounded by core count, since florestad start/stop is CPU bound; fix item 2 first | trivial |
+| 1 | florestad: shutdown loop without `sleep(5s)` | 164s→~0 of worker time/run (35% of test time) | low |
+| 2 | framework: drop the `sleep(1)` after spawn, poll the process instead | ~110s of worker time/run | low |
+| 3 | framework: lower polling intervals to ~50–100ms (`try_wait_on_socket`, `wait_until`) | tens of seconds/run; also shrinks the `wait_for_peers_connections` tail | low |
+| 4 | framework: stop nodes in parallel | proportional to multi-node tests; ~9s per extra florestad on macOS | low |
+| 5 | investigate the failed starts (Finding 5) | ~41s/run plus most of the run-to-run variance | medium |
+| 6 | tests: drop the fixed sleeps (`conftest`, `getrawtransaction`) | 45.7s/run of test-side sleeps | low |
+| 7 | florestad: checksum/flush that does not walk the 2 GiB | no measurable CI gain; ~8s per start/stop **locally on macOS** | medium |
+| 8 | pytest: higher `-n` | nothing on a 4-vCPU runner (`-n 4` is the limit); **locally `-n 12` cuts the suite from 326s to 179s** | trivial |
+
+## Results
+
+The findings above describe the tree before any fix. This is where it landed,
+measured on macOS with 5 runs at `-n 12` against the 3-run baseline, all runs
+green (64 passed, 2 skipped):
+
+| | before | after |
+|---|---:|---:|
+| **wall time** | **179.23s** (stdev 3.05s) | **52.88s** (stdev 4.17s) — **-70%** |
+| florestad start (new chain) | 10.34s | 455ms |
+| florestad stop | 10.35s | 825ms |
+| florestad CPU per lifetime | 22.28s | 1.10s |
+| starts that raised (`wallet.py`) | 1.01s | 203ms |
+| `time.sleep` in tests/fixtures | 45.7s | 17.6s |
+
+Attributed by measuring each commit of the series, 5 runs at `-n 12` each:
+
+| series point | wall time | gain |
+|---|---:|---:|
+| bug fixes only | 177.80s (stdev 2.50s) | — |
+| + framework and test fixes | 140.49s (stdev 5.51s) | **-21.0%** |
+| + florestad and chainstore fixes | 52.88s (stdev 4.17s) | **-62.4%** |
+
+The suite only goes green at the last point: `getblockchaininfo.py` fails 10
+out of 10 runs before it, with the florestad RPC timing out after 30s while
+the node hashes 2 GiB per connected block. On CI the split is inverted, since
+hashing a sparse file is nearly free there and the waits are the whole cost.
+
+What the series does:
+
+1. `perf(florestad)`: wake the shutdown path with a `Notify` instead of polling
+   every 5s.
+2. `perf(tests)`: wait for the daemon RPC port instead of sleeping a fixed
+   second after spawn.
+3. `perf(tests)`: wait on the daemon process when stopping, not on its RPC
+   socket (Bitcoin Core does the same).
+4. `perf(tests)`: poll every 50ms in `wait_until`, and
+5. the same for the RPC socket wait.
+6. `perf(tests)`: stop nodes in parallel during teardown.
+7. `perf(tests)`: drop the extra 1s sleep in `wait_for_peers_connections`.
+8. `perf(tests)`: wait for nodes to agree instead of sleeping between
+   connections.
+9. `perf(chain)`: size the chainstore for the network it runs on (regtest 16 MiB
+   of headers instead of 2 GiB).
+10. `perf(chain)`: checksum only the part of the chainstore we have written
+    (benchmark: 66.06ms -> 14.77ms on mainnet headers).
+
+Plus two correctness fixes the work uncovered:
+
+- `fix(tests)`: propagate `float_tol` through `compare_fields`, which is why
+  `getblockchaininfo.py` failed locally with a 1e-8 tolerance while asking for
+  1e-3.
+- `fix(tests)`: wait for the daemon to answer RPC, not just to open the port.
+  Bitcoin Core answers 503 while warming up, and `perform_request` turns that
+  into a bare `HTTPError`. The fixed sleep used to cover the window; once the
+  daemons started in milliseconds it cost 3 failures and 14 errors per run.
+
+### A measurement that did not count
+
+Two intermediate measurements (32.31s and 29.36s) were taken while that warmup
+race was losing 14 tests per run, so they were fast for the wrong reason. The
+report already flags runs with failures, and the flag was there; it was read
+too late. **Check the pass count before the wall time.**
+
+### What the bottleneck is now
+
+The profile inverted: the `call` phase is now 76% of test time (it was 33%),
+so what is left is mostly real work.
+
+| | worker time/run | mean per call |
+|---|---:|---:|
+| `generatetoaddress` (bitcoind) | 39.74s | 6.62s |
+| florestad stop | 40.43s | 825ms |
+| florestad start | 20.04s | 455ms |
+| `generate` (utreexod) | 19.92s | 1.46s |
+| `loaddescriptor` (florestad) | 10.55s | 791ms |
+
+Next targets, in order:
+
+1. **Mining blocks** is now the single largest item: most three-node tests mine
+   ~100 blocks from scratch. The fix is not a faster RPC, it is sharing a
+   pre-mined chain; the class-scoped fixtures already exist and few tests use
+   them.
+2. **florestad stop, 825ms**, is almost entirely the running node's 1s
+   `MAINTENANCE_TICK` (`node_context.rs:86`). Same shape as the shutdown poll
+   one level down: notify instead of tick, worth ~40s per run.
+3. **florestad start, 455ms**, of which 362ms is the binary itself becoming
+   reachable.
+4. **`loaddescriptor` at 791ms** a call is worth a look on its own.
 
 ## Instrumentation
 
@@ -340,7 +560,7 @@ per daemon broken into stages; slowest tests (with how many nodes each starts);
 sleeps by call site; waits and helpers; RPC; and loadavg per run (to spot noisy
 runs).
 
-### Full instrumented run (mac, 1 run, `-n 4`)
+### Full instrumented run (macOS, 1 run, `-n 4`)
 
 `1 failed (getblockchaininfo, flaky), 63 passed, 2 skipped`, wall 339.9s.
 
@@ -376,14 +596,25 @@ Other things the instrumentation surfaced:
 
 ## Open items
 
-- [ ] **In progress:** local `-n` sweep (2, 4, 8, 12, 14 — 3 rounds each) to
-      measure how much more parallelism actually buys on a 14-core machine.
-      First data point: `-n 2` took 604s against 340s for `-n 4`.
-- [ ] Run `functional-timings.yml` on CI and compare against the Mac, to get
-      the local↔CI ratio.
+- [x] Local `-n` sweep — done, see [Local `-n` sweep](#local--n-sweep-macos-3-rounds-each).
+      Optimum at `-n 12` (179s, 3.37× over `-n 2`); `-n 14` regresses.
+- [x] Run `functional-timings.yml` on CI and compare against the Mac — done,
+      see [CI results](#ci-results-3-runs-ubuntu-latest-4-vcpu--n-4). There is
+      no single local↔CI ratio: the dominant cost differs per platform.
+- [ ] Investigate the failed daemon starts on CI (Finding 5), starting with
+      port collisions between xdist workers.
+- [ ] Fix `compare_fields` in `tests/test_framework/util.py:223` to propagate
+      `float_tol` through its recursive calls — that is why
+      `getblockchaininfo.py` fails locally with a 1e-8 tolerance even though
+      the test asks for 1e-3. It only triggers on slow machines, where ~12s
+      elapse between mining and the RPC call (the field is wall-clock based).
 - [ ] Confirm the checksum cost with a profiler (e.g. `samply` / `Instruments`)
       on florestad startup and shutdown.
 - [ ] Confirm the per-block flush outside IBD (case 4 of Finding 1a).
 - [ ] Measure `--dist=load` against `loadscope`.
-- [ ] Apply changes 1, 3 and 4 and measure the real gain.
-- [ ] Investigate the flaky float failure in `getblockchaininfo.py`.
+- [x] Apply the fixes and measure the real gain — done, see [Results](#results).
+- [ ] Re-measure on CI: every fix has a `timings/fix*` branch, and the local
+      numbers say nothing about the shutdown poll fix, which is the big one there.
+- [ ] Share a pre-mined chain between tests instead of mining ~100 blocks per
+      test, now the largest remaining cost.
+- [ ] Wake the running node's kill-signal check instead of ticking every second.
