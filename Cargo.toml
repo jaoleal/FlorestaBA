@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     # Libraries
+    "crates/floresta-proc-macro",
     "crates/floresta",
     "crates/floresta-node",
     "crates/floresta-chain",
@@ -24,6 +25,7 @@ members = [
 ]
 
 default-members = [
+    "crates/floresta-proc-macro",
     "crates/floresta",
     "crates/floresta-node",
     "crates/floresta-chain",
@@ -61,7 +63,7 @@ kv = { version = "=0.24.0" }
 miniscript = { version = "=13.1.0", default-features = false }
 rand = { version = "=0.10.2" }
 rcgen = { version = "=0.14.7", default-features = false, features = ["aws_lc_rs", "pem"] } # note: >0.14.7 requires Rust 1.86.0
-rustreexo = { version = "=0.6.0" }
+rustreexo = { version = "=0.7.0" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150" }
 spin = { version = "=0.10.1", default-features = false, features = ["spin_mutex", "rwlock"] }
@@ -75,6 +77,7 @@ zstd = { version = "=0.13.3" }
 time = { version = "=0.3.45" } # note: >0.3.45 requires Rust 1.88.0
 
 # Local dependencies
+floresta-proc-macro = { path = "crates/floresta-proc-macro" }
 floresta-chain = { path = "crates/floresta-chain" }
 floresta-compact-filters = { path = "crates/floresta-compact-filters" }
 floresta-electrum = { path = "crates/floresta-electrum" }

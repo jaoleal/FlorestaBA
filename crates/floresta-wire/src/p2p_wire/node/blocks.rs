@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin::Block;
 use bitcoin::BlockHash;
+use bitcoin::OutPoint;
 use bitcoin::p2p::ServiceFlags;
 use floresta_chain::BlockValidationErrors;
 use floresta_chain::BlockchainError;
@@ -43,12 +45,15 @@ pub(crate) struct InflightBlock {
     pub peer: PeerId,
 
     /// The block itself.
-    pub block: Block,
+    pub block: Arc<Block>,
 
     /// Auxiliary data needed for validating this block. Currently, it includes utreexo
     /// leaf data (previous UTXOs spent in the block), the corresponding accumulator
     /// inclusion proof, and the peer id that provided them.
     pub aux_data: Option<UtreexoData>,
+
+    /// If this block is currently being processed in a worker, this is the start time.
+    pub processing_since: Option<Instant>,
 }
 
 impl InflightBlock {
@@ -57,7 +62,7 @@ impl InflightBlock {
     /// If the block doesn't spend any output (i.e., coinbase transaction only) this method adds
     /// empty auxiliary data, which marks this inflight block as ready to process. Blocks with
     /// transactions require [`UtreexoData`] (see [`InflightBlock::add_utreexo_data`]).
-    fn new(block: Block, peer: PeerId) -> Self {
+    fn new(block: Arc<Block>, peer: PeerId) -> Self {
         let aux_data = match block.txdata.len() {
             1 => Some((Vec::new(), Proof::default(), peer)),
             _ => None, // we need auxiliary data for the txs
@@ -67,6 +72,7 @@ impl InflightBlock {
             peer,
             block,
             aux_data,
+            processing_since: None,
         }
     }
 
@@ -82,6 +88,29 @@ where
     Chain: ChainBackend + 'static,
     WireError: From<Chain::Error>,
 {
+    /// Returns `true` only if we can request `BLOCKS_PER_GETDATA` without exceeding the maximum
+    /// unprocessed blocks allowed.
+    pub(crate) fn can_request_more_blocks(&self) -> bool {
+        let max_inflight_blocks = T::BLOCKS_PER_GETDATA * T::MAX_CONCURRENT_GETDATA;
+
+        // If we do a GETDATA request, this will be the new unprocessed count
+        let next_unprocessed = self.unprocessed_blocks() + T::BLOCKS_PER_GETDATA;
+
+        next_unprocessed <= max_inflight_blocks
+    }
+
+    /// Returns the number of blocks awaiting processing (in memory or requested).
+    pub(crate) fn unprocessed_blocks(&self) -> usize {
+        let blocks_in_mem = self.blocks.len();
+        let requested_blocks = self
+            .inflight
+            .keys()
+            .filter(|inflight| matches!(inflight, InflightRequests::Blocks(_)))
+            .count();
+
+        blocks_in_mem + requested_blocks
+    }
+
     pub(crate) fn request_blocks(&mut self, blocks: Vec<BlockHash>) -> Result<(), WireError> {
         let should_request = |block: &BlockHash| {
             let is_inflight = self
@@ -98,8 +127,8 @@ where
             return Ok(());
         }
 
-        let peer =
-            self.send_to_fast_peer(NodeRequest::GetBlock(blocks.clone()), ServiceFlags::NETWORK)?;
+        let block_req = NodeRequest::GetBlock(blocks.clone(), self.witness_mode);
+        let peer = self.send_to_fast_peer(block_req, ServiceFlags::NETWORK)?;
 
         for block in blocks.iter() {
             self.inflight
@@ -126,7 +155,7 @@ where
         debug!("Received block {block_hash} from peer {peer}, with {txdata_len} txs");
 
         self.blocks
-            .insert(block_hash, InflightBlock::new(block, peer));
+            .insert(block_hash, InflightBlock::new(Arc::new(block), peer));
 
         // We only need auxiliary utreexo data if there are non-coinbase transactions
         if txdata_len != 1 {
@@ -317,7 +346,7 @@ where
     fn handle_process_block_error(
         &mut self,
         err: WireError,
-        block: Block,
+        block: Arc<Block>,
         block_peer: PeerId,
         utreexo_peer: PeerId,
     ) -> Result<(), WireError> {
@@ -326,14 +355,8 @@ where
         };
 
         // Return early if the error is not from block validation (e.g., a database error)
-        let e = match chain_err {
-            BlockchainError::TransactionError(tx_err) => tx_err.error,
-            BlockchainError::BlockValidation(block_err) => block_err,
-            // TODO: we need clearer error definitions for utreexo failures
-            BlockchainError::AccumulatorError(_)
-            | BlockchainError::InvalidUtreexoProof
-            | BlockchainError::UtreexoLeaf(_) => BlockValidationErrors::InvalidUtreexoProof,
-            _ => return Ok(()),
+        let Some(e) = Self::block_validation_err(chain_err) else {
+            return Ok(());
         };
 
         let block_hash = block.block_hash();
@@ -352,13 +375,42 @@ where
         Err(WireError::PeerMisbehaving)
     }
 
+    /// Returns the inner block-validation error, if any.
+    pub(crate) fn block_validation_err(e: BlockchainError) -> Option<BlockValidationErrors> {
+        match e {
+            BlockchainError::TransactionError(tx_err) => Some(tx_err.error),
+            BlockchainError::BlockValidation(block_err) => Some(block_err),
+            BlockchainError::AccumulatorError(_)
+            | BlockchainError::InvalidUtreexoProof
+            | BlockchainError::UtreexoLeaf(_) => Some(BlockValidationErrors::InvalidUtreexoProof),
+            _ => None,
+        }
+    }
+
+    /// Returns whether a UTXO was created in the same block as it got spent, by looking for a txid
+    /// inside that block. The goal of this function is to differentiate between two cases where a
+    /// UTXO can't be found:
+    ///  - The UTXO was created inside the same block, but spent before being created.
+    ///  - We got a bad proof.
+    ///
+    /// The former is a consensus violation, and should invalidate a block, the latter isn't.
+    fn is_same_block_spend(block: &Block, outpoint: OutPoint) -> bool {
+        for tx in block.txdata.iter() {
+            if tx.compute_txid() == outpoint.txid {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Handles the different block validation errors that can happen when connecting a block.
     ///
     /// Returns the peer id that caused this error, since it could be block or utreexo-related.
     fn handle_validation_errors(
         &mut self,
         e: &BlockValidationErrors,
-        block: Block,
+        block: Arc<Block>,
         block_peer: PeerId,
         utreexo_peer: PeerId,
     ) -> Option<PeerId> {
@@ -374,7 +426,11 @@ where
             }
 
             // The utreexo peer sent us incomplete leaf data. Block is not yet processed.
-            BlockValidationErrors::UtxoNotFound(_) => {
+            //
+            // If this is a same-block spent, then the block is actually invalid.
+            BlockValidationErrors::UtxoNotFound(outpoint)
+                if !Self::is_same_block_spend(&block, *outpoint) =>
+            {
                 self.blocks
                     .insert(hash, InflightBlock::new(block, block_peer));
 
@@ -391,6 +447,7 @@ where
             | BlockValidationErrors::EmptyOutputs
             | BlockValidationErrors::ScriptError
             | BlockValidationErrors::BlockTooBig
+            | BlockValidationErrors::TooManySigops
             | BlockValidationErrors::NotEnoughPow
             | BlockValidationErrors::TooManyCoins
             | BlockValidationErrors::NotEnoughMoney
@@ -401,11 +458,12 @@ where
             | BlockValidationErrors::BIP94TimeWarp
             | BlockValidationErrors::UnspendableUTXO
             | BlockValidationErrors::NonFinalTransaction
-            | BlockValidationErrors::CoinbaseNotMatured => {
+            | BlockValidationErrors::CoinbaseNotMatured
+            | BlockValidationErrors::UtxoNotFound(_) => {
                 try_and_log!(self.chain.invalidate_block(hash));
 
-                warn!("Block {hash} is invalid, banning peer {block_peer}");
-                Some(block_peer)
+                warn!("Block {hash} is invalid");
+                None
             }
 
             // This block's txdata doesn't match the txid or wtxid merkle root. This can be a

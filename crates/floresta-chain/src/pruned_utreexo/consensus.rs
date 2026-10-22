@@ -22,6 +22,7 @@ use bitcoin::block::Header as BlockHeader;
 use bitcoin::blockdata::Weight;
 #[cfg(feature = "bitcoinkernel")]
 use bitcoin::consensus::serialize;
+use bitcoin::constants::MAX_BLOCK_SIGOPS_COST;
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256;
 use bitcoin::script;
@@ -38,6 +39,7 @@ use swift_sync_agg::SwiftSyncAgg;
 use super::chainparams::ChainParams;
 use super::error::BlockValidationErrors;
 use super::error::BlockchainError;
+use super::sigops::SigopExt;
 use super::udata;
 use crate::TransactionError;
 use crate::extensions::Bip30UnspendableExt;
@@ -82,6 +84,17 @@ pub const UNSPENDABLE_BIP30_UTXO_91812: [u8; 32] = [
     0xbc, 0x6b, 0x4b, 0xf7, 0xce, 0xbb, 0xd3, 0x3a, 0x18, 0xd6, 0xb0, 0xfe, 0x1f, 0x8e, 0xcc, 0x7a,
     0xa5, 0x40, 0x30, 0x83, 0xc3, 0x9e, 0xe3, 0x43, 0xb9, 0x85, 0xd5, 0x1f, 0xd0, 0x29, 0x5a, 0xd8,
 ];
+
+#[derive(Debug)]
+/// Aggregator delta, supply contribution and Utreexo addition leaf hashes returned by
+/// [`Consensus::process_block_swiftsync`].
+///
+/// `unspent_amount` includes both hinted unspent outputs and unspendable outputs.
+pub struct SwiftSyncDelta {
+    pub aggregator_delta: SwiftSyncAgg,
+    pub unspent_amount: Amount,
+    pub utreexo_adds: Vec<BitcoinNodeHash>,
+}
 
 /// This struct contains all the information and methods needed to validate a block,
 /// it is used by the [ChainState](crate::ChainState) to validate blocks and transactions.
@@ -181,8 +194,13 @@ impl Consensus {
     /// - The first transaction in the block must be coinbase
     /// - The coinbase transaction must have the correct value (subsidy + fees)
     /// - The block must not create more coins than allowed
+    /// - The block's signature-operation cost must not exceed the consensus limit
     /// - No output may be spent more than once within the block
     /// - All transactions must be valid, as verified by [`Consensus::verify_transaction`]
+    ///
+    /// `utxos` must contain only outputs supplied by the Utreexo proof. Outputs created by this
+    /// block are inserted after their transaction validates, preserving consensus transaction
+    /// order for same-block spends.
     #[allow(unused)]
     pub fn verify_block_transactions(
         height: u32,
@@ -200,10 +218,19 @@ impl Consensus {
 
         // Total block fees that the miner can claim in the coinbase
         let mut fee = Amount::ZERO;
+        let mut sigop_cost: usize = 0;
 
         for (n, transaction) in transactions.iter().enumerate() {
             if !Self::is_final_transaction(transaction, height, lock_time_cutoff) {
                 Err(BlockValidationErrors::NonFinalTransaction)?;
+            }
+
+            // Match Bitcoin Core's ConnectBlock: accumulate GetTransactionSigOpCost before
+            // spending the inputs, including the coinbase transaction's legacy sigops.
+            // https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp#L2519-L2569
+            sigop_cost = sigop_cost.saturating_add(transaction.sigop_cost(&utxos, flags));
+            if sigop_cost > usize::try_from(MAX_BLOCK_SIGOPS_COST).expect("non-negative") {
+                Err(BlockValidationErrors::TooManySigops)?;
             }
 
             if n == 0 {
@@ -211,19 +238,38 @@ impl Consensus {
                     Err(BlockValidationErrors::FirstTxIsNotCoinbase)?;
                 }
                 Self::verify_coinbase(transaction)?;
-                // Skip next checks: coinbase input is exempt, coinbase reward checked later
-                continue;
+            } else {
+                // Actually verify the transaction
+                let (in_value, out_value) = Self::verify_transaction(
+                    transaction,
+                    &mut utxos,
+                    height,
+                    verify_script,
+                    flags,
+                )?;
+
+                // Fee is the difference between inputs and outputs. In the above function call we
+                // have verified that `out_value <= in_value` (no underflow risk).
+                fee = fee
+                    .checked_add(in_value - out_value)
+                    .ok_or(BlockValidationErrors::TooManyCoins)?;
             }
 
-            // Actually verify the transaction
-            let (in_value, out_value) =
-                Self::verify_transaction(transaction, &mut utxos, height, verify_script, flags)?;
-
-            // Fee is the difference between inputs and outputs. In the above function call we have
-            // verified that `out_value <= in_value` (no underflow risk).
-            fee = fee
-                .checked_add(in_value - out_value)
-                .ok_or(BlockValidationErrors::TooManyCoins)?;
+            // Outputs become spendable only after their creating transaction has been validated.
+            // In particular, this rejects transactions that spend an output created later in the
+            // same block.
+            let txid = transaction.compute_txid();
+            for (vout, txout) in transaction.output.iter().enumerate() {
+                utxos.insert(
+                    OutPoint::new(txid, vout as u32),
+                    UtxoData {
+                        txout: txout.clone(),
+                        is_coinbase: n == 0,
+                        creation_height: height,
+                        creation_time: 0, // TODO add MTP(`height` - 1)
+                    },
+                );
+            }
         }
 
         // Check coinbase output values to ensure the miner isn't producing excess coins
@@ -254,7 +300,7 @@ impl Consensus {
         height: u32,
         block: &Block,
         txids: Vec<Txid>,
-        unspent_indexes: HashSet<u32>,
+        unspent_indexes: &HashSet<u32>,
         salt: &SipHashKeys,
     ) -> Result<(SwiftSyncAgg, Amount), BlockchainError> {
         let transactions = &block.txdata;
@@ -267,6 +313,8 @@ impl Consensus {
 
         // The block-wide output index to compare against unspent output hints
         let mut output_index = 0;
+        // Bad hints can overcount outputs in a valid block. Saturate and let final checks abort
+        // SwiftSync instead of returning `TooManyCoins`, which would wrongly invalidate the block.
         let mut unspent_amount = Amount::ZERO;
         let mut agg = SwiftSyncAgg::zero();
 
@@ -301,7 +349,7 @@ impl Consensus {
             for (vout, out) in transaction.output.iter().enumerate() {
                 // Special case: unspendable outputs do not count for the block `output_index`
                 if Self::is_unspendable(&out.script_pubkey) {
-                    unspent_amount += out.value;
+                    unspent_amount = unspent_amount.checked_add(out.value).unwrap_or(Amount::MAX);
                     continue;
                 }
 
@@ -309,7 +357,7 @@ impl Consensus {
                 let hinted_unspent = unspent_indexes.contains(&output_index);
 
                 if hinted_unspent {
-                    unspent_amount += out.value;
+                    unspent_amount = unspent_amount.checked_add(out.value).unwrap_or(Amount::MAX);
                 } else {
                     spent_vouts.push(vout as u32);
                 }
@@ -557,6 +605,7 @@ impl Consensus {
     /// - BIP34 coinbase-encoded height once activated (at `bip34_height`)
     /// - if there are SegWit transactions, the witness commitment is present and correct
     /// - total block weight is within the 4,000,000 WU limit
+    /// - legacy signature-operation cost is within the block-wide limit
     pub fn check_block(&self, block: &Block, height: u32) -> Result<Vec<Txid>, BlockchainError> {
         let Some(txids) = Self::check_merkle_root(block) else {
             Err(BlockValidationErrors::BadMerkleRoot)?
@@ -574,6 +623,14 @@ impl Consensus {
 
         if block.weight() > Weight::MAX_BLOCK {
             Err(BlockValidationErrors::BlockTooBig)?;
+        }
+
+        // Match Bitcoin Core's CheckBlock: sum every transaction's legacy sigops at four cost
+        // units each. P2SH and witness costs are added later once prevouts are available.
+        // https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp#L4001-L4009
+        let sigop_cost: usize = block.txdata.iter().map(|tx| tx.legacy_sigop_cost()).sum();
+        if sigop_cost > usize::try_from(MAX_BLOCK_SIGOPS_COST).expect("non-negative") {
+            Err(BlockValidationErrors::TooManySigops)?;
         }
 
         Ok(txids)
@@ -600,6 +657,8 @@ impl Consensus {
     /// Since previous outputs are unavailable, this does **not** verify the coinbase reward,
     /// which depends on total fees (out - in amounts). As a result, the total supply check
     /// described above is weaker than the amount checks performed in traditional AssumeValid.
+    /// P2SH and witness sigop costs likewise require previous outputs and are assumed here;
+    /// [`Consensus::check_block`] still enforces Bitcoin Core's legacy block-wide sigop limit.
     ///
     /// In theory, an attacker with majority hashpower and the ability to insert an invalid
     /// AssumeValid hash into the Floresta codebase could make us accept a chain with excess
@@ -613,12 +672,26 @@ impl Consensus {
         &self,
         block: &Block,
         height: u32,
-        unspent_indexes: HashSet<u32>,
+        unspent_indexes: &HashSet<u32>,
         salt: &SipHashKeys,
-    ) -> Result<(SwiftSyncAgg, Amount), BlockchainError> {
+    ) -> Result<SwiftSyncDelta, BlockchainError> {
         let txids = self.check_block(block, height)?;
 
-        Self::verify_block_transactions_swiftsync(height, block, txids, unspent_indexes, salt)
+        let utreexo_adds = udata::proof_util::get_block_adds_from_hints(
+            block,
+            &txids,
+            height,
+            block.block_hash(),
+            unspent_indexes,
+        );
+        let (agg, amount) =
+            Self::verify_block_transactions_swiftsync(height, block, txids, unspent_indexes, salt)?;
+
+        Ok(SwiftSyncDelta {
+            aggregator_delta: agg,
+            unspent_amount: amount,
+            utreexo_adds,
+        })
     }
 
     /// Removes and returns the UTXO spent by `input`.
@@ -665,15 +738,12 @@ impl Consensus {
                 .all(|input| input.sequence.is_final())
     }
 
-    /// Validates the script size and the number of sigops in a prevout scriptPubKey or scriptSig.
+    /// Rejects scripts that exceed the execution-size limit or begin with `OP_RETURN`.
     fn validate_script_size<F: Fn() -> Txid>(
         script: &ScriptBuf,
         txid: F,
     ) -> Result<(), TransactionError> {
         if Self::is_unspendable(script) {
-            return Err(tx_err!(txid, ScriptError));
-        }
-        if script.count_sigops() > 80_000 {
             return Err(tx_err!(txid, ScriptError));
         }
         Ok(())
@@ -793,7 +863,7 @@ impl Consensus {
         let adds = udata::proof_util::get_block_adds(block, height, block_hash);
 
         // Update the accumulator
-        let acc = acc.modify(&adds, &del_hashes, &proof)?.0;
+        let acc = acc.modify(&adds, &del_hashes, &proof)?;
         Ok(acc)
     }
 
@@ -996,13 +1066,34 @@ mod tests {
     use bitcoin::TxIn;
     use bitcoin::TxOut;
     use bitcoin::Txid;
+    use bitcoin::Witness;
     use bitcoin::absolute::LockTime;
     use bitcoin::consensus::deserialize;
     use bitcoin::consensus::encode::deserialize_hex;
     use bitcoin::constants::genesis_block;
     use bitcoin::hashes::Hash;
     use bitcoin::opcodes::OP_TRUE;
+    use bitcoin::opcodes::Opcode;
+    use bitcoin::opcodes::all::OP_CHECKMULTISIG;
+    use bitcoin::opcodes::all::OP_CHECKSIG;
     use bitcoin::opcodes::all::OP_NOP;
+    use bitcoin::opcodes::all::OP_PUSHNUM_1;
+    use bitcoin::opcodes::all::OP_PUSHNUM_2;
+    use bitcoin::opcodes::all::OP_PUSHNUM_3;
+    use bitcoin::opcodes::all::OP_PUSHNUM_4;
+    use bitcoin::opcodes::all::OP_PUSHNUM_5;
+    use bitcoin::opcodes::all::OP_PUSHNUM_6;
+    use bitcoin::opcodes::all::OP_PUSHNUM_7;
+    use bitcoin::opcodes::all::OP_PUSHNUM_8;
+    use bitcoin::opcodes::all::OP_PUSHNUM_9;
+    use bitcoin::opcodes::all::OP_PUSHNUM_10;
+    use bitcoin::opcodes::all::OP_PUSHNUM_11;
+    use bitcoin::opcodes::all::OP_PUSHNUM_12;
+    use bitcoin::opcodes::all::OP_PUSHNUM_13;
+    use bitcoin::opcodes::all::OP_PUSHNUM_14;
+    use bitcoin::opcodes::all::OP_PUSHNUM_15;
+    use bitcoin::opcodes::all::OP_PUSHNUM_16;
+    use bitcoin::script::PushBytesBuf;
     use bitcoin::transaction::Version;
     use floresta_common::assert_err;
     use floresta_common::assert_ok;
@@ -1015,6 +1106,8 @@ mod tests {
     use rand::seq::SliceRandom;
 
     use super::*;
+    use crate::pruned_utreexo::chainparams::VERIFY_P2SH;
+    use crate::pruned_utreexo::chainparams::VERIFY_WITNESS;
 
     #[macro_export]
     /// Macro for creating a TxOut
@@ -1074,6 +1167,52 @@ mod tests {
             txid: Txid::all_zeros(),
             vout: 0,
         }
+    }
+
+    fn same_block_spend_fixture() -> (Vec<Transaction>, HashMap<OutPoint, UtxoData>) {
+        let proof_outpoint = dummy_outpoint();
+        let coinbase = build_tx(
+            vec![txin!(
+                OutPoint::null(),
+                ScriptBuf::from_bytes(vec![0x00, 0x00])
+            )],
+            vec![txout!(50, ScriptBuf::new())],
+        );
+        let parent = build_tx(
+            vec![txin!(proof_outpoint)],
+            vec![txout!(100, ScriptBuf::new())],
+        );
+        let child = build_tx(
+            vec![txin!(OutPoint::new(parent.compute_txid(), 0))],
+            vec![txout!(100, ScriptBuf::new())],
+        );
+        let utxos = HashMap::from([(
+            proof_outpoint,
+            UtxoData {
+                txout: txout!(100, ScriptBuf::new()),
+                is_coinbase: false,
+                creation_height: 1,
+                creation_time: 0,
+            },
+        )]);
+
+        (vec![coinbase, parent, child], utxos)
+    }
+
+    #[test]
+    fn block_transactions_accept_same_block_spends_in_order() {
+        let (transactions, utxos) = same_block_spend_fixture();
+
+        Consensus::verify_block_transactions(
+            2,
+            0,
+            utxos,
+            &transactions,
+            Amount::from_sat(50),
+            false,
+            0,
+        )
+        .expect("an output may be spent by a later transaction in the block");
     }
 
     fn tx_with_lock_time(lock_time: LockTime, sequence: Sequence) -> Transaction {
@@ -1376,6 +1515,250 @@ mod tests {
         match consensus.check_block(&block, height) {
             Err(BlockchainError::BlockValidation(BlockValidationErrors::BlockTooBig)) => (),
             other => panic!("We should have `BlockValidationErrors::BlockTooBig`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_legacy_block_sigops_limit() {
+        let consensus = Consensus::from(Network::Bitcoin);
+        let mut block = genesis_block(Network::Bitcoin);
+        let sigop_script = |count| ScriptBuf::from_bytes(vec![OP_CHECKSIG.to_u8(); count]);
+
+        // Legacy sigops cost four units: 20,000 reach the 80,000 limit
+        block.txdata[0].output[0].script_pubkey = sigop_script(10_000);
+        block.txdata.push(build_tx(
+            vec![txin!(dummy_outpoint())],
+            vec![txout!(0, sigop_script(10_000))],
+        ));
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+
+        let cost: usize = block.txdata.iter().map(|tx| tx.legacy_sigop_cost()).sum();
+        assert_eq!(cost, 80_000);
+        assert_ok!(consensus.check_block(&block, 0));
+
+        // If we reach 20,001 sigops the cost is 80,004 so it must be rejected
+        block.txdata[1].output.push(txout!(0, sigop_script(1)));
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+
+        let cost: usize = block.txdata.iter().map(|tx| tx.legacy_sigop_cost()).sum();
+        assert_eq!(cost, 80_004);
+        match consensus.check_block(&block, 0) {
+            Err(BlockchainError::BlockValidation(BlockValidationErrors::TooManySigops)) => (),
+            other => panic!("Expected TooManySigops, got: {other:?}"),
+        }
+    }
+
+    /// Validates a coinbase plus a P2SH spend at the 80,000-cost boundary.
+    ///
+    /// Here, push-only means scriptSig is just a data push of the redeem script.
+    /// Otherwise it starts with the non-push opcode `OP_CHECKSIG`.
+    ///
+    /// With `VERIFY_P2SH`, `(extra_redeem_opcode, push_only)` gives:
+    /// - `(None, true) -> 80,000`,
+    /// - `(Some(OP_CHECKSIG), true) -> 80,004`,
+    /// - `(None, false) -> 40,004`,
+    /// - `(Some(OP_CHECKSIG), false) -> 40,004`.
+    ///
+    /// A non-push-only scriptSig makes Core ignore all redeem-script sigops;
+    /// only the prepended `OP_CHECKSIG` adds four legacy cost units.
+    fn verify_p2sh_sigop_block(
+        extra_redeem_opcode: Option<Opcode>,
+        push_only: bool,
+        flags: u32,
+    ) -> Result<(), BlockchainError> {
+        // Legacy CHECKMULTISIG costs 20 sigops * 4 units: 500 * 20 * 4 = 40,000.
+        let coinbase = build_tx(
+            vec![txin!(OutPoint::null(), ScriptBuf::from_bytes(vec![0; 2]))],
+            vec![txout!(
+                0,
+                ScriptBuf::from_bytes(vec![OP_CHECKMULTISIG.to_u8(); 500])
+            )],
+        );
+
+        // With no preceding OP_N, accurate P2SH counting also gives 500 * 20 * 4 = 40,000.
+        let mut redeem = vec![OP_CHECKMULTISIG.to_u8(); 500];
+        if let Some(opcode) = extra_redeem_opcode {
+            redeem.push(opcode.to_u8());
+        }
+        let redeem = ScriptBuf::from_bytes(redeem);
+
+        let mut script_sig = ScriptBuf::builder()
+            .push_slice(PushBytesBuf::try_from(redeem.clone().into_bytes()).unwrap())
+            .into_script();
+
+        if !push_only {
+            script_sig =
+                ScriptBuf::from_bytes([&[OP_CHECKSIG.to_u8()], script_sig.as_bytes()].concat());
+        }
+
+        let spend = build_tx(
+            vec![txin!(dummy_outpoint(), script_sig)],
+            vec![txout!(0, ScriptBuf::new())],
+        );
+        let utxos = HashMap::from([(
+            dummy_outpoint(),
+            UtxoData {
+                txout: txout!(0, ScriptBuf::new_p2sh(&redeem.script_hash())),
+                is_coinbase: false,
+                creation_height: 0,
+                creation_time: 0,
+            },
+        )]);
+        Consensus::verify_block_transactions(
+            0,
+            0,
+            utxos,
+            &[coinbase, spend],
+            Amount::ZERO,
+            false,
+            flags,
+        )
+    }
+
+    #[test]
+    fn test_contextual_block_sigops_limit() {
+        let flags = VERIFY_P2SH | VERIFY_WITNESS;
+
+        // Coinbase legacy cost and the P2SH redeem-script cost are 40,000 each.
+        assert_ok!(verify_p2sh_sigop_block(None, true, flags));
+
+        // Exceeds the 80,000 cost limit by 4.
+        match verify_p2sh_sigop_block(Some(OP_CHECKSIG), true, flags) {
+            Err(BlockchainError::BlockValidation(BlockValidationErrors::TooManySigops)) => (),
+            other => panic!("Expected TooManySigops, got: {other:?}"),
+        }
+
+        // P2SH sigops are flag-gated.
+        assert_ok!(verify_p2sh_sigop_block(Some(OP_CHECKSIG), true, 0));
+        // Core ignores the redeem script unless the entire scriptSig is push-only.
+        assert_ok!(verify_p2sh_sigop_block(Some(OP_CHECKSIG), false, flags));
+
+        let wpkh_spend = build_tx(vec![txin!(dummy_outpoint())], vec![]);
+        let utxos = HashMap::from([(
+            dummy_outpoint(),
+            UtxoData {
+                txout: txout!(0, ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::all_zeros())),
+                is_coinbase: false,
+                creation_height: 0,
+                creation_time: 0,
+            },
+        )]);
+        // Enabling P2SH alone must not also enable witness accounting.
+        assert_eq!(wpkh_spend.sigop_cost(&utxos, VERIFY_P2SH), 0);
+        assert_eq!(wpkh_spend.sigop_cost(&utxos, flags), 1);
+    }
+
+    #[test]
+    fn test_get_bip34_height() {
+        let block = decode_block("./testdata/block_866342/raw.zst");
+
+        assert_eq!(Consensus::get_bip34_height(&block), Some(866_342));
+    }
+
+    #[test]
+    fn test_get_bip34_height_no_coinbase() {
+        let mut block = decode_block("./testdata/block_866342/raw.zst");
+        block.txdata.remove(0);
+
+        assert_eq!(Consensus::get_bip34_height(&block), None);
+    }
+
+    #[test]
+    fn test_get_bip34_height_empty_coinbase() {
+        let mut block = decode_block("./testdata/block_866342/raw.zst");
+        block.txdata = vec![Transaction {
+            version: Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        }];
+
+        assert_eq!(Consensus::get_bip34_height(&block), None);
+    }
+
+    #[test]
+    fn test_get_bip34_height_invalid_script() {
+        let tx = Transaction {
+            version: Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(vec![0x02, 0x01]),
+                sequence: Sequence::MAX,
+                witness: Witness::default(),
+            }],
+            output: Vec::new(),
+        };
+
+        let mut block = decode_block("./testdata/block_866342/raw.zst");
+        block.txdata = vec![tx];
+
+        assert_eq!(Consensus::get_bip34_height(&block), None);
+    }
+
+    #[test]
+    fn test_get_bip34_height_non_push_instruction() {
+        let tx = Transaction {
+            version: Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(vec![]),
+                sequence: Sequence::MAX,
+                witness: Witness::default(),
+            }],
+            output: Vec::new(),
+        };
+
+        let mut block = decode_block("./testdata/block_866342/raw.zst");
+        block.txdata = vec![tx];
+
+        assert_eq!(Consensus::get_bip34_height(&block), None);
+    }
+
+    #[test]
+    fn test_get_bip34_height_op_pushnum() {
+        let test_cases = [
+            OP_PUSHNUM_1,
+            OP_PUSHNUM_2,
+            OP_PUSHNUM_3,
+            OP_PUSHNUM_4,
+            OP_PUSHNUM_5,
+            OP_PUSHNUM_6,
+            OP_PUSHNUM_7,
+            OP_PUSHNUM_8,
+            OP_PUSHNUM_9,
+            OP_PUSHNUM_10,
+            OP_PUSHNUM_11,
+            OP_PUSHNUM_12,
+            OP_PUSHNUM_13,
+            OP_PUSHNUM_14,
+            OP_PUSHNUM_15,
+            OP_PUSHNUM_16,
+        ];
+
+        for (expected_height, opcode) in (1..).zip(test_cases.iter()) {
+            let tx = Transaction {
+                version: Version::ONE,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::from_bytes(vec![opcode.to_u8()]),
+                    sequence: Sequence::MAX,
+                    witness: Witness::default(),
+                }],
+                output: Vec::new(),
+            };
+
+            let mut block = decode_block("./testdata/block_866342/raw.zst");
+            block.txdata = vec![tx];
+
+            assert_eq!(
+                Consensus::get_bip34_height(&block),
+                Some(expected_height),
+                "opcode {:?}",
+                opcode
+            );
         }
     }
 
@@ -1792,6 +2175,40 @@ mod tests {
     }
 
     #[test]
+    fn test_swift_sync_unspent_amount_saturates() {
+        let consensus = Consensus::from(Network::Bitcoin);
+        let salt = SipHashKeys::default();
+
+        for (script, unspent_indexes) in [
+            (ScriptBuf::new_op_return([]), HashSet::new()),
+            (ScriptBuf::new(), (0..=8_785).collect()),
+        ] {
+            let mut block = genesis_block(Network::Bitcoin);
+            block.txdata[0].output[0].value = Amount::ZERO;
+
+            // Individually valid output amounts can overflow their block-wide sum
+            for vout in 0..8_785 {
+                block.txdata.push(build_tx(
+                    vec![txin!(OutPoint::new(Txid::all_zeros(), vout))],
+                    vec![txout!(Amount::MAX_MONEY.to_sat(), script.clone())],
+                ));
+            }
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            assert!(block.weight() <= Weight::MAX_BLOCK);
+
+            let processed = consensus
+                .process_block_swiftsync(&block, 1, &unspent_indexes, &salt)
+                .expect("overflow must remain available for the final supply check");
+
+            assert_eq!(
+                processed.unspent_amount,
+                Amount::MAX,
+                "overflow must saturate so the final supply check rejects it",
+            );
+        }
+    }
+
+    #[test]
     fn test_swift_sync_agg_blocks() {
         let consensus = Consensus::from(Network::Bitcoin);
         let mainnet_blocks = read_blocks_txt();
@@ -1813,37 +2230,40 @@ mod tests {
             match i {
                 // We add the only TxOut in this block to the aggregator (spent later).
                 9 => {
-                    let unspent_indexes = HashSet::new();
-                    let (agg_blk_9, amount) = consensus
+                    let unspent_indexes = &HashSet::new();
+                    let processed = consensus
                         .process_block_swiftsync(block, 9, unspent_indexes, &salt)
                         .unwrap();
+                    let agg_blk_9 = processed.aggregator_delta;
 
                     assert!(!agg_blk_9.is_zero(), "block aggregator shouldn't be zero");
                     assert!(agg.is_zero());
                     agg += agg_blk_9;
                     assert!(!agg.is_zero());
 
-                    supply += amount;
+                    supply += processed.unspent_amount;
                 }
                 // This block spends the TxOut that was added to the aggregator in block 9.
                 170 => {
-                    let unspent_indexes = HashSet::from_iter(vec![0, 1, 2]);
-                    let (agg_blk_170, amount) = consensus
+                    let unspent_indexes = &HashSet::from_iter(vec![0, 1, 2]);
+                    let processed = consensus
                         .process_block_swiftsync(block, 170, unspent_indexes, &salt)
                         .unwrap();
+                    let agg_blk_170 = processed.aggregator_delta;
 
                     assert!(!agg_blk_170.is_zero(), "block aggregator shouldn't be zero");
                     assert!(!agg.is_zero(), "global aggregator shouldn't be zero");
                     agg += agg_blk_170;
                     assert!(agg.is_zero(), "aggregators should cancel out to zero");
 
-                    supply += amount;
+                    supply += processed.unspent_amount;
                 }
                 i => {
-                    let unspent_indexes = default_unspent_idx.clone();
-                    let (agg_i, amount) = consensus
+                    let unspent_indexes = &default_unspent_idx;
+                    let processed = consensus
                         .process_block_swiftsync(block, i as u32, unspent_indexes, &salt)
                         .unwrap();
+                    let agg_i = processed.aggregator_delta;
 
                     assert!(agg_i.is_zero());
                     agg += agg_i;
@@ -1861,7 +2281,7 @@ mod tests {
                             "we remove the element after finding the input, agg should be zero"
                         );
                     }
-                    supply += amount;
+                    supply += processed.unspent_amount;
                 }
             }
         }
@@ -1874,12 +2294,14 @@ mod tests {
         let block_9 = &mainnet_blocks[9];
         let block_170 = &mainnet_blocks[170];
 
-        let (agg_9, _) = consensus
-            .process_block_swiftsync(block_9, 9, HashSet::new(), &salt)
+        let processed_9 = consensus
+            .process_block_swiftsync(block_9, 9, &HashSet::new(), &salt)
             .unwrap();
-        let (agg_170, _) = consensus
-            .process_block_swiftsync(block_170, 170, HashSet::from_iter(vec![0, 1, 2]), &salt)
+        let processed_170 = consensus
+            .process_block_swiftsync(block_170, 170, &HashSet::from_iter(vec![0, 1, 2]), &salt)
             .unwrap();
+        let agg_9 = processed_9.aggregator_delta;
+        let agg_170 = processed_170.aggregator_delta;
 
         assert!(!agg_9.is_zero(), "block aggregator shouldn't be zero");
         assert!(!agg_170.is_zero(), "block aggregator shouldn't be zero");
