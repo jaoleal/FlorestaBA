@@ -705,6 +705,10 @@ impl<Blockchain: BlockchainInterface> ElectrumServer<Blockchain> {
                 .unwrap();
 
             self.handle_block(block, height)?;
+
+            // A rescan only runs out of IBD, where every block counts. The
+            // matched blocks are few, so a write each is no concern
+            self.bump_cache_height(height)?;
         }
 
         Ok(())
@@ -732,12 +736,45 @@ impl<Blockchain: BlockchainInterface> ElectrumServer<Blockchain> {
     }
 
     /// Handles the blocks waiting in `blocks`, in the order they arrived.
+    ///
+    /// The height the wallet is cached to is written once, after the whole
+    /// batch, rather than once per block: the write flushes to disk, and one
+    /// flush per block makes a long batch outlast the patience of the client
+    /// whose request the batch is holding back.
     fn handle_blocks(&self, blocks: &Channel<(bitcoin::Block, u32)>) {
+        let mut cached_to = None;
+
         for (block, height) in blocks.recv() {
             if let Err(e) = self.handle_block(block, height) {
-                error!("Error processing block at height {height}: {e}")
+                error!("Error processing block at height {height}: {e}");
+                continue;
+            }
+
+            // Out of IBD we keep track of every block. During it, blocks come
+            // in far too fast to be worth it, so we only note every thousandth
+            if !self.chain.is_in_ibd() || height % 1000 == 0 {
+                cached_to = Some(cached_to.map_or(height, |cached: u32| cached.max(height)));
             }
         }
+
+        // Only now that the blocks are in the wallet may we say so
+        if let Some(height) = cached_to {
+            if let Err(e) = self.bump_cache_height(height) {
+                error!("Error caching the wallet up to height {height}: {e}")
+            }
+        }
+    }
+
+    /// Takes note that the wallet is cached up to `height`, unless it already
+    /// is further ahead.
+    ///
+    /// This writes to disk, so callers should not do it once per block.
+    fn bump_cache_height(&self, height: u32) -> Result<(), super::error::Error> {
+        if height > self.address_cache.get_cache_height()? {
+            self.address_cache.bump_height(height)?;
+        }
+
+        Ok(())
     }
 
     fn handle_block(&self, block: bitcoin::Block, height: u32) -> Result<(), super::error::Error> {
@@ -749,12 +786,6 @@ impl<Blockchain: BlockchainInterface> ElectrumServer<Blockchain> {
                 "hex": serialize_hex(&block.header)
             }]
         });
-
-        let current_height = self.address_cache.get_cache_height()?;
-
-        if (!self.chain.is_in_ibd() || height % 1000 == 0) && (height > current_height) {
-            self.address_cache.bump_height(height)?;
-        }
 
         if self.chain.get_height().unwrap() == height {
             for client in &mut self.clients.values() {
