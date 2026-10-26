@@ -37,11 +37,14 @@ class ElectrumClient(BaseClient):
         """
         return self.request("blockchain.estimatefee", [target])
 
-    def headers_subscribe(self, script_hash: str):
+    def headers_subscribe(self):
         """
         Subscribe for receiving new headers as blocks are mined.
+
+        Returns the header of the current tip, which the server only answers
+        once it has taken in every block waiting for it.
         """
-        return self.request("blockchain.headers.subscribe", [script_hash])
+        return self.request("blockchain.headers.subscribe", [])
 
     def relay_fee(self):
         """

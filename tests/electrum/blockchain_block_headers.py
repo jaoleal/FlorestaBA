@@ -11,6 +11,7 @@ import random
 import pytest
 
 from test_framework.bitcoin import BlockHeader
+from test_framework.util import wait_until
 
 MINE_BLOCKS = 4036
 MAX_HEADERS = 2016
@@ -23,6 +24,9 @@ def test_block_headers(setup_logging, node_manager, florestad_utreexod):
     florestad, _ = florestad_utreexod
 
     node_manager.generate_blocks_and_sync(MINE_BLOCKS, is_finished_ibd=False)
+
+    log.info("Waiting for the Electrum server to catch up with the chain...")
+    wait_for_electrum_tip(florestad, MINE_BLOCKS)
 
     log.info("Testing out-of-range request...")
     response = florestad.electrum.block_headers(MINE_BLOCKS + 2, 10)
@@ -51,6 +55,29 @@ def test_block_headers(setup_logging, node_manager, florestad_utreexod):
     assert response["count"] <= response["max"]
     assert response["max"] == MAX_HEADERS
     assert response["count"] <= MAX_HEADERS
+
+
+def wait_for_electrum_tip(florestad, height):
+    """Wait until the Electrum server reports `height` as its tip.
+
+    A synced RPC does not mean a synced Electrum server: the server is a
+    separate subscriber to the chain and may still have thousands of blocks
+    queued, which it takes in before answering the first request. That first
+    request may well outlast the client timeout, so keep asking until one of
+    them gets through.
+    """
+
+    def at_tip():
+        try:
+            return florestad.electrum.headers_subscribe()["height"] == height
+        except TimeoutError:
+            return False
+
+    wait_until(
+        at_tip,
+        timeout=120,
+        error_msg=f"Electrum server did not reach height {height}",
+    )
 
 
 def compare_headers_range(florestad, start_height, count):
