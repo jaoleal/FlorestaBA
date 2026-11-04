@@ -148,7 +148,7 @@ impl<Blockchain: RpcChain> NetworkRpc for RpcImpl<Blockchain> {
                 services: info.services.to_string(),
                 user_agent: info.user_agent,
                 initial_height: info.initial_height,
-                kind: format!("{:?}", info.kind).to_lowercase(),
+                kind: info.kind.as_str().to_string(),
                 state: format!("{:?}", info.state),
                 transport_protocol: format!("{:?}", info.transport_protocol),
                 bip152_hb_from: info.bip152_hb_from,
