@@ -2,6 +2,8 @@
 
 mod chain_selector;
 mod peer_latency;
+#[cfg(feature = "metrics")]
+mod peer_metrics;
 mod swift_sync;
 mod sync_node;
 mod utils;
